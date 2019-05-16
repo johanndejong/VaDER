@@ -1,1 +1,4 @@
-# VaDER
+In the literature, the problem of clustering multivariate short time series is still largely unaddressed. However, multivariate short time series are very common in clinical data, when multivariate patient measurements are taken over time. The clustering (stratification) of such clinical data is additionally complicated by the typically high degree of missingness. 
+
+Variational deep embedding with recurrence (VaDER) is a new method for clustering multivariate short time series with potentially many missing values,  VaDER extends the variational deep embedding clustering algorithm (Jiang et al., IJCAI, 2017) by (1) incorporating long short term memory networks into a VaDE architecture and (2) defining a loss function that directly deals with missing values via implicit imputation and loss re-weighting. 
+
