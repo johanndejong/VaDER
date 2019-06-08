@@ -37,7 +37,7 @@ W_train = np.random.choice(2, X_train.shape)
 vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
               learning_rate=1e-3, output_activation=None, recurrent=True, batch_size=16)
 # pre-train without latent loss
-vader.pre_fit(n_epoch=20, verbose=True)
+vader.pre_fit(n_epoch=50, verbose=True)
 # train with latent loss
 vader.fit(n_epoch=50, verbose=True)
 # get the clusters
