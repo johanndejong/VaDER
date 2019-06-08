@@ -4,7 +4,7 @@ from vader import VADER
 
 save_path = os.path.join('test_vader', 'vader.ckpt')
 
-# generating some simple random data
+# generating some simple random data [ns * 2 samples, nt - 1 time points, 2 variables]
 nt = int(8)
 ns = int(2e2)
 sigma = 0.5
