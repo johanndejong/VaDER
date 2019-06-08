@@ -21,15 +21,15 @@ y_train = np.repeat([0, 1], ns)
 # resulting in four clusters in total
 ii = np.random.permutation(ns * 2)
 X_train = np.stack((X_train, X_train[ii,]), axis=2)
+# we now get four clusters in total
 y_train = y_train * 2**0 + y_train[ii] * 2**1
 
 # randomly re-order the samples
 ii = np.random.permutation(ns * 2)
 X_train = X_train[ii,:]
-# X_train = np.expand_dims(X_train, 2)
 y_train = y_train[ii]
-# Randomly set some values to missing (0: missing, 1: present)
-# All X_train[i,j] for which W_train[i,j] == 0 are treated as missing (i.e. their specific value is ignored)
+# Randomly set values to missing (0: missing, 1: present)
+# Note: All X_train[i,j] for which W_train[i,j] == 0 are treated as missing (i.e. their specific value is ignored)
 W_train = np.random.choice(2, X_train.shape)
 
 # Note: y_train is used purely for monitoring performance when a ground truth clustering is available.
