@@ -201,45 +201,21 @@ class VADER:
             # decode
             def f_monolayer(z):
 
-                # inputs = tf.tile(tf.expand_dims(tf.zeros(tf.shape(z)), 1), [int(1), int(self.D), int(1)])
-                #
-                # # Use LSTM with peepholes instead? --> remember that LSTM initial_state requires a tuple!!!
-                # decoder = tf.nn.rnn_cell.GRUCell(
-                #     num_units=self.n_hidden[-1],
-                #     activation=None, name="decoder"
-                # )
-                # dec_output, _ = tf.nn.dynamic_rnn(
-                #     cell=decoder, inputs=inputs,
-                #     dtype=tf.float32, swap_memory=True,
-                #     initial_state=z
-                # )
-                # # # reverse (for easier fitting)
-                # # dec_output = tf.reverse(dec_output, axis=[1])
-                #
-                # # map back to dimensions (D, I)
-                # dec_weight = tf.Variable(tf.truncated_normal([self.n_hidden[-1], self.I], dtype=tf.float32))
-                # dec_bias = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32))
-                # x_raw = tf.map_fn(lambda d_o: tf.matmul(d_o, dec_weight), dec_output) + dec_bias
-                # x_raw = tf.identity(x_raw, name="x_raw")
-                # x = self.output_activation(x_raw, name="x_output")
-
                 n_hidden = self.n_hidden[0]
-                dec_weight_ = tf.Variable(tf.truncated_normal([n_hidden, self.I], dtype=tf.float32), name='dec_weight')
-                dec_bias_ = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32), name='dec_bias')
+                weight = tf.Variable(tf.truncated_normal([n_hidden, self.I], dtype=tf.float32), name='weight')
+                bias = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32), name='bias')
 
-                dec_inputs = [tf.zeros((tf.shape(z)[0], self.I), dtype=tf.float32) for _ in range(self.D)]
+                input = [tf.zeros((tf.shape(z)[0], self.I), dtype=tf.float32) for _ in range(self.D)]
                 if self.cell_type == "LSTM":
-                    _dec_cell = tf.nn.rnn_cell.LSTMCell(n_hidden, name="dec_cell", use_peepholes=True)
-                    (dec_outputs, (_, dec_state)) = tf.nn.static_rnn(_dec_cell, dec_inputs, initial_state=(tf.zeros(tf.shape(z)), z), dtype=tf.float32)
+                    decoder = tf.nn.rnn_cell.LSTMCell(n_hidden, name="decoder", use_peepholes=True)
+                    (output, (_, _)) = tf.nn.static_rnn(decoder, input, initial_state=(tf.zeros(tf.shape(z)), z), dtype=tf.float32)
                 else:
-                    _dec_cell = tf.nn.rnn_cell.GRUCell(n_hidden, name="dec_cell")
-                    (dec_outputs, dec_state) = tf.nn.static_rnn(_dec_cell, dec_inputs, initial_state=z, dtype=tf.float32)
-                # if reverse:
-                #     dec_outputs = dec_outputs[::-1]
-                dec_output_ = tf.transpose(tf.stack(dec_outputs), [1, 0, 2])
-                dec_weight_ = tf.tile(tf.expand_dims(dec_weight_, 0), [tf.shape(z)[0], 1, 1])
-                output_ = tf.matmul(dec_output_, dec_weight_) + dec_bias_
-                x_raw = tf.identity(output_, name="x_raw")
+                    decoder = tf.nn.rnn_cell.GRUCell(n_hidden, name="decoder")
+                    (output, _) = tf.nn.static_rnn(decoder, input, initial_state=z, dtype=tf.float32)
+                output = tf.transpose(tf.stack(output), [1, 0, 2])
+                weight = tf.tile(tf.expand_dims(weight, 0), [tf.shape(z)[0], 1, 1])
+                output = tf.matmul(output, weight) + bias
+                x_raw = tf.identity(output, name="x_raw")
                 x = self.output_activation(x_raw, name="x_output")
 
                 return x, x_raw
@@ -250,24 +226,22 @@ class VADER:
                 hidden = z
                 for n in n_hidden[1:]:
                     hidden = my_dense_layer(hidden, n)
-                dec_weight_ = tf.Variable(tf.truncated_normal([n_hidden[-1], self.I], dtype=tf.float32),
-                                          name='dec_weight')
-                dec_bias_ = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32), name='dec_bias')
+                weight = tf.Variable(tf.truncated_normal([n_hidden[-1], self.I], dtype=tf.float32),
+                                          name='weight')
+                bias = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32), name='bias')
 
-                dec_inputs = [tf.zeros((tf.shape(hidden)[0], self.I), dtype=tf.float32) for _ in range(self.D)]
+                input = [tf.zeros((tf.shape(hidden)[0], self.I), dtype=tf.float32) for _ in range(self.D)]
                 if self.cell_type == "LSTM":
-                    _dec_cell = tf.nn.rnn_cell.LSTMCell(n_hidden[-1], name="dec_cell", use_peepholes=True)
-                    (dec_outputs, (_, dec_state)) = tf.nn.static_rnn(_dec_cell, dec_inputs, initial_state=(tf.zeros(tf.shape(hidden)), hidden), dtype=tf.float32)
+                    decoder = tf.nn.rnn_cell.LSTMCell(n_hidden[-1], name="decoder", use_peepholes=True)
+                    (output, (_, _)) = tf.nn.static_rnn(decoder, input, initial_state=(tf.zeros(tf.shape(hidden)), hidden), dtype=tf.float32)
                 else:
-                    _dec_cell = tf.nn.rnn_cell.GRUCell(n_hidden[-1], name="dec_cell")
-                    (dec_outputs, dec_state) = tf.nn.static_rnn(_dec_cell, dec_inputs, initial_state=hidden, dtype=tf.float32)
+                    decoder = tf.nn.rnn_cell.GRUCell(n_hidden[-1], name="decoder")
+                    (output, _) = tf.nn.static_rnn(decoder, input, initial_state=hidden, dtype=tf.float32)
 
-                # if reverse:
-                #     dec_outputs = dec_outputs[::-1]
-                dec_output_ = tf.transpose(tf.stack(dec_outputs), [1, 0, 2])
-                dec_weight_ = tf.tile(tf.expand_dims(dec_weight_, 0), [tf.shape(hidden)[0], 1, 1])
-                output_ = tf.matmul(dec_output_, dec_weight_) + dec_bias_
-                x_raw = tf.identity(output_, name="x_raw")
+                output = tf.transpose(tf.stack(output), [1, 0, 2])
+                weight = tf.tile(tf.expand_dims(weight, 0), [tf.shape(hidden)[0], 1, 1])
+                output = tf.matmul(output, weight) + bias
+                x_raw = tf.identity(output, name="x_raw")
                 x = self.output_activation(x_raw, name="x_output")
                 return x, x_raw
 
