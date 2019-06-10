@@ -8,7 +8,6 @@ import numpy as np
 from sklearn.mixture import GaussianMixture
 import losses
 import layers
-# from tensorflow.python import debug as tf_debug
 
 class VADER:
     '''
@@ -116,6 +115,7 @@ class VADER:
             I : integer
                 X_train.shape[2]. The number of variables if self.recurrent is True, otherwise not defined.
         '''
+
         if seed is not None:
             np.random.seed(seed)
 
@@ -149,6 +149,8 @@ class VADER:
         self.reconstruction_loss = np.array([])
         self.latent_loss = np.array([])
         self.n_param = None
+        self.bic = None
+        self.aic = None
         self.cell_type = cell_type
         self.recurrent = recurrent
         if self.recurrent:
@@ -297,7 +299,7 @@ class VADER:
         return X_batch, y_batch, W_batch
 
     def _print_progress(self, epoch, sess, graph):
-        X_batch, y_batch, W_batch = self._get_batch(max(10 * self.batch_size, self.X.shape[0]))
+        X_batch, y_batch, W_batch = self._get_batch(min(10 * self.batch_size, self.X.shape[0]))
         training_op, loss, rec_loss, lat_loss, X, W, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(
             graph)
         loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss],
