@@ -149,8 +149,6 @@ class VADER:
         self.reconstruction_loss = np.array([])
         self.latent_loss = np.array([])
         self.n_param = None
-        self.bic = None
-        self.aic = None
         self.cell_type = cell_type
         self.recurrent = recurrent
         if self.recurrent:
