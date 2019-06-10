@@ -6,8 +6,9 @@ import sys
 import os
 import numpy as np
 from sklearn.mixture import GaussianMixture
-import multiprocessing as mp
-from tensorflow.python import debug as tf_debug
+import losses
+import layers
+# from tensorflow.python import debug as tf_debug
 
 class VADER:
     '''
@@ -149,212 +150,27 @@ class VADER:
         self.latent_loss = np.array([])
         self.n_param = None
         self.cell_type = cell_type
-
         self.recurrent = recurrent
         if self.recurrent:
             self.I = X_train.shape[2]  # multivariate dimensions
-
-        if self.recurrent:
-            # encode
-            def g_monolayer(X):
-                n_hidden = self.n_hidden[0]
-                X = [tf.squeeze(t, [1]) for t in tf.split(X, self.D, 1)]
-                if self.cell_type == "LSTM":
-                    encoder = tf.nn.rnn_cell.LSTMCell(
-                        num_units=n_hidden + n_hidden,  # one for mu, one for sigma
-                        activation=tf.nn.tanh, name="encoder", use_peepholes=True
-                    )
-                    (_, (_, hidden)) = tf.nn.static_rnn(encoder, X, dtype=tf.float32)
-                else:
-                    encoder = tf.nn.rnn_cell.GRUCell(
-                        num_units=n_hidden + n_hidden,  # one for mu, one for sigma
-                        activation=tf.nn.tanh, name="encoder"
-                    )
-                    (_, hidden) = tf.nn.static_rnn(encoder, X, dtype=tf.float32)
-
-                mu = tf.identity(hidden[:, :n_hidden], name="mu_tilde")
-                log_sigma = tf.identity(hidden[:, n_hidden:], name="log_sigma_tilde")
-                return mu, log_sigma
-
-            # encode
-            def g_multilayer(X):
-                X = [tf.squeeze(t, [1]) for t in tf.split(X, self.D, 1)]
-                if self.cell_type == "LSTM":
-                    encoder = tf.nn.rnn_cell.LSTMCell(
-                        num_units=self.n_hidden[0],
-                        activation=tf.nn.tanh, name="encoder", use_peepholes=True
-                    )
-                    (_, (_, hidden)) = tf.nn.static_rnn(encoder, X, dtype=tf.float32)
-                else:
-                    encoder = tf.nn.rnn_cell.GRUCell(
-                        num_units=self.n_hidden[0],
-                        activation=tf.nn.tanh, name="encoder"
-                    )
-                    (_, hidden) = tf.nn.static_rnn(encoder, X, dtype=tf.float32)
-                for n in self.n_hidden[1:-1]:
-                    hidden = my_dense_layer(hidden, n)
-                mu = tf.identity(my_dense_layer(hidden, self.n_hidden[-1], activation=None), name="mu_tilde")
-                log_sigma = tf.identity(my_dense_layer(hidden, self.n_hidden[-1], activation=None),
-                                        name="log_sigma_tilde")
-                return mu, log_sigma
-
-            # decode
-            def f_monolayer(z):
-
-                n_hidden = self.n_hidden[0]
-                weight = tf.Variable(tf.truncated_normal([n_hidden, self.I], dtype=tf.float32), name='weight')
-                bias = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32), name='bias')
-
-                input = [tf.zeros((tf.shape(z)[0], self.I), dtype=tf.float32) for _ in range(self.D)]
-                if self.cell_type == "LSTM":
-                    decoder = tf.nn.rnn_cell.LSTMCell(n_hidden, name="decoder", use_peepholes=True)
-                    (output, (_, _)) = tf.nn.static_rnn(decoder, input, initial_state=(tf.zeros(tf.shape(z)), z), dtype=tf.float32)
-                else:
-                    decoder = tf.nn.rnn_cell.GRUCell(n_hidden, name="decoder")
-                    (output, _) = tf.nn.static_rnn(decoder, input, initial_state=z, dtype=tf.float32)
-                output = tf.transpose(tf.stack(output), [1, 0, 2])
-                weight = tf.tile(tf.expand_dims(weight, 0), [tf.shape(z)[0], 1, 1])
-                output = tf.matmul(output, weight) + bias
-                x_raw = tf.identity(output, name="x_raw")
-                x = self.output_activation(x_raw, name="x_output")
-
-                return x, x_raw
-
-            # decode
-            def f_multilayer(z):
-                n_hidden = self.n_hidden[::-1]
-                hidden = z
-                for n in n_hidden[1:]:
-                    hidden = my_dense_layer(hidden, n)
-                weight = tf.Variable(tf.truncated_normal([n_hidden[-1], self.I], dtype=tf.float32),
-                                          name='weight')
-                bias = tf.Variable(tf.constant(0.1, shape=[self.I], dtype=tf.float32), name='bias')
-
-                input = [tf.zeros((tf.shape(hidden)[0], self.I), dtype=tf.float32) for _ in range(self.D)]
-                if self.cell_type == "LSTM":
-                    decoder = tf.nn.rnn_cell.LSTMCell(n_hidden[-1], name="decoder", use_peepholes=True)
-                    (output, (_, _)) = tf.nn.static_rnn(decoder, input, initial_state=(tf.zeros(tf.shape(hidden)), hidden), dtype=tf.float32)
-                else:
-                    decoder = tf.nn.rnn_cell.GRUCell(n_hidden[-1], name="decoder")
-                    (output, _) = tf.nn.static_rnn(decoder, input, initial_state=hidden, dtype=tf.float32)
-
-                output = tf.transpose(tf.stack(output), [1, 0, 2])
-                weight = tf.tile(tf.expand_dims(weight, 0), [tf.shape(hidden)[0], 1, 1])
-                output = tf.matmul(output, weight) + bias
-                x_raw = tf.identity(output, name="x_raw")
-                x = self.output_activation(x_raw, name="x_output")
-                return x, x_raw
-
-            def g(X):
-                if len(self.n_hidden) > 1:
-                    return g_multilayer(X)
-                else:
-                    return g_monolayer(X)
-
-            def f(X):
-                if len(self.n_hidden) > 1:
-                    return f_multilayer(X)
-                else:
-                    return f_monolayer(X)
         else:
-            # encode
-            def g(X):
-                hidden = tf.clip_by_value(X, self.eps, 1 - self.eps)
-                for n in self.n_hidden[:-1]:
-                    hidden = my_dense_layer(hidden, n)
-                mu = tf.identity(my_dense_layer(hidden, self.n_hidden[-1], activation=None), name="mu_tilde")
-                log_sigma = tf.identity(my_dense_layer(hidden, self.n_hidden[-1], activation=None), name="log_sigma_tilde")
-                return mu, log_sigma
+            self.I = 1
 
-            # decode
-            def f(z):
-                hidden = z
-                for n in (self.n_hidden[:-1])[::-1]:
-                    hidden = my_dense_layer(hidden, n)
-                x_raw = tf.identity(my_dense_layer(hidden, self.D, activation=None), name="x_raw")
-                x = self.output_activation(x_raw, name="x_output")  # the reconstructions, one for each mixture component
-                return x, x_raw
+        # encoder function
+        def g(X):
+            return layers.encode(X, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent)
 
-        # initializer = tf.contrib.layers.variance_scaling_initializer()
-        # l2_reg = 0.0001
-        # he_init = tf.contrib.layers.variance_scaling_initializer()  # He initialization
-        # l2_regularizer = tf.contrib.layers.l2_regularizer(l2_reg)
-        my_dense_layer = partial(
-            tf.layers.dense,
-            activation=tf.nn.softplus,  # tf.nn.softplus, # tf.nn.elu,
-            kernel_initializer=None  # initializer
-        )
+        # decoder function
+        def f(z):
+            return layers.decode(z, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent, self.output_activation)
 
+        # reconstruction loss function
         def reconstruction_loss(X, x, x_raw, W):
-            # reconstruction loss: E[log p(x|z)]
+            return losses.reconstruction_loss(X, x, x_raw, W, self.output_activation, self.D, self.I, self.eps)
 
-            if (self.output_activation == tf.nn.sigmoid):
-                rec_loss = tf.losses.sigmoid_cross_entropy(tf.clip_by_value(X, self.eps, 1 - self.eps), x_raw, W)
-            else:
-                rec_loss = tf.losses.mean_squared_error(X, x, W)
-
-            # re-scale the loss to the original dims (making sure it balances correctly with the latent loss)
-            rec_loss = rec_loss * tf.cast(tf.reduce_prod(tf.shape(W)), dtype=tf.float32) / tf.reduce_sum(W)
-            if self.recurrent:
-                # sum across the features, average across the samples
-                rec_loss = self.D * self.I * rec_loss
-            else:
-                # sum across the features, average across the samples
-                rec_loss = self.D * rec_loss
-            # rec_loss = self.D * rec_loss
-
-            return rec_loss
-
+        # latent loss function
         def latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde):
-            if self.K == 1: # ordinary VAE
-                latent_loss = tf.reduce_mean(0.5 * tf.reduce_sum(
-                    tf.square(tf.exp(log_sigma_tilde)) + tf.square(mu_tilde) - 1 - 2 * log_sigma_tilde,
-                    axis=1
-                ))
-            else:
-                # latent_loss = 0.5 * tf.reduce_sum(
-                #     tf.square(tf.exp(log_sigma_tilde)) + tf.square(mu_tilde)
-                #     - 1 - tf.log(eps + tf.square(tf.exp(log_sigma_tilde))))
-                # latent_loss = tf.identity(latent_loss, name = "latent_loss")
-
-                def log_pdf(z, mu, sigma):
-                    def f(i):
-                        return - tf.square(z - mu[i]) / 2.0 / (self.eps + sigma[i]) - tf.log(
-                            self.eps + self.eps + 2.0 * np.pi * sigma[i]) / 2.0
-                    return tf.transpose(tf.map_fn(f, np.arange(self.K), dtype=tf.float32), [1, 0, 2])
-
-                # log_p = tf.reduce_sum(tf.log(phi_c) - 0.5 * tf.log(2 * np.pi * sigma_c))
-
-                # log_p = tf.log(self.eps + phi_c) + tf.reduce_sum(log_pdf(z, mu_c, sigma_c), axis=2)
-                # gamma_c = tf.nn.softmax(tf.exp(log_p))
-                # log_gamma_c = tf.log(gamma_c + self.eps)
-
-                log_p = tf.log(self.eps + phi_c) + tf.reduce_sum(log_pdf(z, mu_c, sigma_c), axis=2)
-                lse_p = tf.reduce_logsumexp(log_p, keepdims=True, axis=1)
-                log_gamma_c = log_p - lse_p
-
-                gamma_c = tf.exp(log_gamma_c)
-
-                # latent loss: E[log p(z|c) + log p(c) - log q(z|x) - log q(c|x)]
-                term1 = tf.log(self.eps + sigma_c)
-                term2 = tf.transpose(
-                    tf.map_fn(lambda i: tf.exp(log_sigma_tilde) / (self.eps + sigma_c[i]), np.arange(self.K), tf.float32),
-                    [1, 0, 2])
-                term3 = tf.transpose(
-                    tf.map_fn(lambda i: tf.square(mu_tilde - mu_c[i]) / (self.eps + sigma_c[i]), np.arange(self.K),
-                              tf.float32), [1, 0, 2])
-
-                latent_loss1 = 0.5 * tf.reduce_sum(gamma_c * tf.reduce_sum(term1 + term2 + term3, axis=2), axis=1)
-                # latent_loss2 = - tf.reduce_sum(gamma_c * tf.log(self.eps + phi_c / (self.eps + gamma_c)), axis=1)
-                latent_loss2 = - tf.reduce_sum(gamma_c * (tf.log(self.eps + phi_c) - log_gamma_c), axis=1)
-                latent_loss3 = - 0.5 * tf.reduce_sum(1 + log_sigma_tilde, axis=1)
-                # average across the samples
-                latent_loss1 = tf.reduce_mean(latent_loss1)
-                latent_loss2 = tf.reduce_mean(latent_loss2)
-                latent_loss3 = tf.reduce_mean(latent_loss3)
-                # add the different terms
-                latent_loss = latent_loss1 + latent_loss2 + latent_loss3
-            return latent_loss
+            return losses.latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde, self.K, self.eps)
 
         tf.reset_default_graph()
         graph = tf.get_default_graph()
