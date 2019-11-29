@@ -5,6 +5,7 @@ from scipy.stats import norm
 import sys
 import os
 import numpy as np
+import warnings
 from sklearn.mixture import GaussianMixture
 import losses
 import layers
@@ -13,7 +14,7 @@ class VADER:
     '''
         A VADER object represents a (recurrent) (variational) (Gaussian mixture) autoencoder
     '''
-    def __init__(self, X_train, W_train=None, y_train=None, n_hidden=[12, 2], k=3, output_activation=None,
+    def __init__(self, X_train, W_train=None, y_train=None, n_hidden=[12, 2], k=3, groups=None, output_activation=None,
         batch_size = 32, learning_rate=1e-3, alpha=1.0, phi=None, cell_type="LSTM", recurrent=True,
         save_path=os.path.join('vader', 'vader.ckpt'), eps=1e-10, seed=None, n_thread=0):
         '''
@@ -37,6 +38,9 @@ class VADER:
                 (default: [12, 2])
             k : int
                 Number of mixture components. (default: 3)
+            groups : int
+                Grouping of the input variables as a list of length X.shape[2], with integers {0, 1, 2, ...} denoting
+                groups; used for weighting proportional to group size. (default: None)
             output_activation : str
                 Output activation function, "sigmoid" for binary output, None for continuous output. (default: None)
             batch_size : int
@@ -78,6 +82,11 @@ class VADER:
                 The hidden layers. List of length >= 1. Specification of the number of nodes in the hidden layers.
             K : int
                 Number of mixture components.
+            groups: int
+                Grouping of the input variables as a list of length self.X.shape[2], with integers {0, 1, 2, ...}
+                denoting groups; used for weighting proportional to group size.
+            G : float
+                Weights determined by variable groups, as computed from the groups argument.
             output_activation : str
                 Output activation function, "sigmoid" for binary output, None for continuous output.
             batch_size : int
@@ -134,6 +143,15 @@ class VADER:
         self.alpha = alpha  # weight for the latent loss (alpha times the reconstruction loss weight)
         self.learning_rate = learning_rate
         self.K = k  # 10 number of mixture components (clusters)
+        if groups is not None:
+            self.groups = np.array(groups, np.int32)
+            self.G = 1 / np.bincount(groups)[groups]
+            self.G = self.G / sum(self.G)
+            self.G = np.broadcast_to(self.G, self.X.shape)
+        else:
+            self.groups = np.ones(X_train.shape[-1], np.int32)
+            self.G = np.ones(X_train.shape, dtype=np.float32)
+
         self.n_hidden = n_hidden  # n_hidden[-1] is dimensions of the mixture distribution (size of hidden layer)
         if output_activation is None:
             self.output_activation = tf.identity
@@ -182,11 +200,13 @@ class VADER:
             if self.recurrent:
                 X = tf.placeholder(tf.float32, [None, self.D, self.I], name="X_input")
                 W = tf.placeholder(tf.float32, [None, self.D, self.I], name="W_input")
-                A = tf.get_variable("A", shape=[self.D, self.I], dtype=tf.float32, trainable=True)
+                G = tf.placeholder(tf.float32, [None, self.D, self.I], name="G_input")
+                A = tf.get_variable("A", dtype=tf.float32, trainable=True, initializer=self._initialize_imputation(self.X, self.W))
             else:
                 X = tf.placeholder(tf.float32, [None, self.D], name="X_input")
                 W = tf.placeholder(tf.float32, [None, self.D], name="W_input")
-                A = tf.get_variable("A", shape=[self.D], dtype=tf.float32, trainable=True)
+                G = tf.placeholder(tf.float32, [None, self.D], name="G_input")
+                A = tf.get_variable("A", dtype=tf.float32, trainable=True, initializer=self._initialize_imputation(self.X, self.W))
             alpha_t = tf.placeholder_with_default(tf.convert_to_tensor(self.alpha), (), name="alpha_input")
             mu_c_unscaled = tf.get_variable("mu_c_unscaled", [self.K, self.n_hidden[-1]], dtype=tf.float32, trainable=True)
             mu_c = tf.identity(mu_c_unscaled, name="mu_c")
@@ -214,7 +234,7 @@ class VADER:
             x, x_raw = f(z)
 
             # calculate the loss
-            rec_loss = reconstruction_loss(X, x, x_raw, W)
+            rec_loss = reconstruction_loss(X, x, x_raw, G * W)
             rec_loss = tf.identity(rec_loss, name="reconstruction_loss")
 
             lat_loss = tf.cond(
@@ -238,6 +258,23 @@ class VADER:
             intra_op_parallelism_threads=self.n_thread, inter_op_parallelism_threads=self.n_thread)) as sess:
             init.run()
             saver.save(sess, self.save_path)
+
+    def _initialize_imputation(self, X, W):
+        # average per time point, variable
+        W_A = np.sum(W, axis=0)
+        A = np.sum(X * W, axis=0)
+        A[W_A>0] = A[W_A>0] / W_A[W_A>0]
+        # if not available, then average across entire variable
+        if self.recurrent:
+            for i in np.arange(A.shape[0]):
+                for j in np.arange(A.shape[1]):
+                    if W_A[i,j] == 0:
+                        A[i,j] = np.sum(X[:,:,j]) / np.sum(W[:,:,j])
+                        W_A[i,j] = 1
+        # if not available, then average across all variables
+        A[W_A==0] = np.mean(X[W==1])
+        return A.astype(np.float32)
+        # return np.zeros(X.shape[1:], np.float32)
 
     def _restore_session(self):
         tf.reset_default_graph()
@@ -267,6 +304,8 @@ class VADER:
             ind = linear_assignment(w.max() - w)
             return sum([w[i, j] for i, j in ind]) * 1.0 / Y_pred.size, np.array(w)
 
+        y_pred = np.array(y_pred, np.int32)
+        y_true = np.array(y_true, np.int32)
         return cluster_acc(y_pred, y_true)
 
     def _get_vars(self, graph):
@@ -276,6 +315,7 @@ class VADER:
         lat_loss = graph.get_tensor_by_name("latent_loss:0")
         X = graph.get_tensor_by_name("X_input:0")
         W = graph.get_tensor_by_name("W_input:0")
+        G = graph.get_tensor_by_name("G_input:0")
         alpha_t = graph.get_tensor_by_name("alpha_input:0")
         z = graph.get_tensor_by_name("z:0")
         x_output = graph.get_tensor_by_name("x_output:0")
@@ -284,7 +324,7 @@ class VADER:
         mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
         log_sigma_tilde = graph.get_tensor_by_name("log_sigma_tilde:0")
         phi_c = graph.get_tensor_by_name("phi_c:0")
-        return training_op, loss, rec_loss, lat_loss, X, W, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde
+        return training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde
 
     def _get_batch(self, batch_size):
         ii = np.random.choice(np.arange(self.X.shape[0]), batch_size, replace=False)
@@ -294,18 +334,19 @@ class VADER:
         else:
             y_batch = None
         W_batch = self.W[ii,]
-        return X_batch, y_batch, W_batch
+        G_batch = self.G[ii,]
+        return X_batch, y_batch, W_batch, G_batch
 
     def _print_progress(self, epoch, sess, graph):
-        X_batch, y_batch, W_batch = self._get_batch(min(10 * self.batch_size, self.X.shape[0]))
-        training_op, loss, rec_loss, lat_loss, X, W, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(
+        X_batch, y_batch, W_batch, G_batch = self._get_batch(min(10 * self.batch_size, self.X.shape[0]))
+        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(
             graph)
         loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss],
-                                                                      feed_dict={X: X_batch, W: W_batch, alpha_t: self.alpha})
+                                                                      feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha})
         self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
         self.latent_loss = np.append(self.latent_loss, latent_loss_val)
         self.loss = np.append(self.loss, loss_val)
-        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_batch, W: W_batch, alpha_t: self.alpha}), mu_c.eval(), sigma_c.eval(),
+        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha}), mu_c.eval(), sigma_c.eval(),
                                  phi_c.eval())
         # if y_batch is not None:
         if y_batch is not None:
@@ -326,7 +367,7 @@ class VADER:
                   )
         return 0
 
-    def fit(self, n_epoch=10, verbose=False):
+    def fit(self, n_epoch=10, learning_rate=None, verbose=False):
         '''
             Train a VADER object.
 
@@ -334,6 +375,9 @@ class VADER:
             ----------
             n_epoch : int
                 Train n_epoch epochs. (default: 10)
+            learning_rate: float
+                Learning rate for this set of epochs (default: learning rate specified at object construction)
+                (NB: not currently used!)
             verbose : bool
                 Print progress? (default: False)
 
@@ -347,8 +391,12 @@ class VADER:
         self.n_epoch += n_epoch
 
         sess, saver, graph = self._restore_session()
+
+        # if learning_rate is not None:
+        #     lr_t = graph.get_tensor_by_name("learning_rate:0")
+
         writer = tf.summary.FileWriter(self.save_path, sess.graph)
-        training_op, loss, rec_loss, lat_loss, X, W, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(graph)
+        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(graph)
         X = graph.get_tensor_by_name("X_input:0")
         if verbose:
             self._print_progress(-1, sess, graph)
@@ -356,20 +404,22 @@ class VADER:
             n_batches = self.X.shape[0] // self.batch_size
             for iteration in range(n_batches):
                 sys.stdout.flush()
-                X_batch, y_batch, W_batch = self._get_batch(self.batch_size)
-                sess.run(training_op, feed_dict={X: X_batch, W: W_batch, alpha_t: self.alpha})
+                X_batch, y_batch, W_batch, G_batch = self._get_batch(self.batch_size)
+                sess.run(training_op, feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha})
             if verbose:
                 self._print_progress(epoch, sess, graph)
-        loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss], feed_dict={X: self.X, W: self.W, alpha_t: self.alpha})
+        loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss], feed_dict={X: self.X, W: self.W, G: self.G, alpha_t: self.alpha})
         self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
         self.latent_loss = np.append(self.latent_loss, latent_loss_val)
         self.loss = np.append(self.loss, loss_val)
+        # if learning_rate is not None:
+        #     self.learning_rate = self_learning_rate
         saver.save(sess, self.save_path)
         writer.close()
         sess.close()
         return 0
 
-    def pre_fit(self, n_epoch=10, verbose=False):
+    def pre_fit(self, n_epoch=10, learning_rate=None, verbose=False):
         '''
             Pre-train a VADER object using only the latent loss, and initialize the Gaussian mixture parameters using
             the resulting latent representation.
@@ -378,6 +428,9 @@ class VADER:
             ----------
             n_epoch : int
                 Train n_epoch epochs. (default: 10)
+            learning_rate: float
+                Learning rate for this set of epochs(default: learning rate specified at object construction)
+                (NB: not currently used!)
             verbose : bool
                 Print progress? (default: False)
 
@@ -385,38 +438,41 @@ class VADER:
             -------
             0 if successful
         '''
+
         # save the alpha
         alpha = self.alpha
         # pre-train using non-variational AEs
         self.alpha = 0.0
-
         # pre-train
-        ret = self.fit(n_epoch, verbose)
+        ret = self.fit(n_epoch, learning_rate, verbose)
 
-        # map to latent
-        z = self.map_to_latent(self.X, self.W, n_samp=10)
-        # fit GMM
-        gmm = GaussianMixture(n_components=self.K, covariance_type="diag").fit(z)
-        # get GMM parameters
-        phi = np.log(gmm.weights_ + self.eps) # inverse softmax
-        mu = gmm.means_
-        sigma = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
+        try:
+            # map to latent
+            z = self.map_to_latent(self.X, self.W, n_samp=10)
+            # fit GMM
+            gmm = GaussianMixture(n_components=self.K, covariance_type="diag", reg_covar=1e-04).fit(z)
+            # get GMM parameters
+            phi = np.log(gmm.weights_ + self.eps) # inverse softmax
+            mu = gmm.means_
+            sigma = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
 
-        # initialize mixture components
-        sess, saver, graph = self._restore_session()
-        def my_get_variable(varname):
-            return [v for v in tf.global_variables() if v.name == varname][0]
-        mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
-        sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(mu, dtype=tf.float32)))
-        sigma_c_unscaled = my_get_variable("sigma_c_unscaled:0")
-        sess.run(sigma_c_unscaled.assign(tf.convert_to_tensor(sigma, dtype=tf.float32)))
-        phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
-        sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi, dtype=tf.float32)))
-        saver.save(sess, self.save_path)
-        sess.close()
-
-        # restore the alpha
-        self.alpha = alpha
+            # initialize mixture components
+            sess, saver, graph = self._restore_session()
+            def my_get_variable(varname):
+                return [v for v in tf.global_variables() if v.name == varname][0]
+            mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
+            sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(mu, dtype=tf.float32)))
+            sigma_c_unscaled = my_get_variable("sigma_c_unscaled:0")
+            sess.run(sigma_c_unscaled.assign(tf.convert_to_tensor(sigma, dtype=tf.float32)))
+            phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
+            sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi, dtype=tf.float32)))
+            saver.save(sess, self.save_path)
+            sess.close()
+        except:
+            warnings.warn("Failed to initialize VaDER with Gaussian mixture")
+        finally:
+            # restore the alpha
+            self.alpha = alpha
         return ret
 
     def map_to_latent(self, X_c, W_c=None, n_samp=1):
@@ -441,12 +497,14 @@ class VADER:
         '''
         if W_c is None:
             W_c = np.ones(X_c.shape)
+        G_c = np.ones(X_c.shape)
         sess, saver, graph = self._restore_session()
         z = graph.get_tensor_by_name("z:0")
         mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
         X = graph.get_tensor_by_name("X_input:0")
         W = graph.get_tensor_by_name("W_input:0")
-        latent = np.concatenate([z.eval(feed_dict={X: X_c, W: W_c}) for i in np.arange(n_samp)], axis=0)
+        G = graph.get_tensor_by_name("G_input:0")
+        latent = np.concatenate([z.eval(feed_dict={X: X_c, W: W_c, G: G_c}) for i in np.arange(n_samp)], axis=0)
         sess.close()
         return latent
 
@@ -485,6 +543,7 @@ class VADER:
         lat_loss = graph.get_tensor_by_name("latent_loss:0")
         X = graph.get_tensor_by_name("X_input:0")
         W = graph.get_tensor_by_name("W_input:0")
+        G = graph.get_tensor_by_name("G_input:0")
         alpha_t = graph.get_tensor_by_name("alpha_input:0")
 
         def my_get_variable(varname):
@@ -508,11 +567,28 @@ class VADER:
             phi_c_old = phi_c_unscaled.eval()
             sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi_c_new, dtype=tf.float32)))
 
-        lat_loss = lat_loss.eval(feed_dict={X: X_c, W: W_c, alpha_t: self.alpha})
-        rec_loss = rec_loss.eval(feed_dict={X: X_c, W: W_c, alpha_t: self.alpha})
+        G_c = 1 / np.bincount(self.groups)[self.groups]
+        G_c = G_c / sum(G_c)
+        G_c = np.broadcast_to(G_c, X_c.shape)
+
+        lat_loss = lat_loss.eval(feed_dict={X: X_c, W: W_c, G: G_c, alpha_t: self.alpha})
+        rec_loss = rec_loss.eval(feed_dict={X: X_c, W: W_c, G: G_c, alpha_t: self.alpha})
 
         sess.close()
         return {"reconstruction_loss": rec_loss, "latent_loss": lat_loss}
+
+    def get_imputation_matrix(self):
+        '''
+            Returns
+            -------
+            The imputation matrix.
+        '''
+        sess, saver, graph = self._restore_session()
+        def my_get_variable(varname):
+            return [v for v in tf.global_variables() if v.name == varname][0]
+        A = my_get_variable("A:0").eval()
+        sess.close()
+        return A
 
     def cluster(self, X_c, W_c=None, mu_c=None, sigma_c=None, phi_c=None):
         '''
@@ -546,6 +622,7 @@ class VADER:
         mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
         X = graph.get_tensor_by_name("X_input:0")
         W = graph.get_tensor_by_name("W_input:0")
+        G = graph.get_tensor_by_name("G_input:0")
         if phi_c is None:
             mu_c = graph.get_tensor_by_name("mu_c:0").eval()
         if phi_c is None:
@@ -555,8 +632,9 @@ class VADER:
 
         if W_c is None:
             W_c = np.ones(X_c.shape)
+        G_c = np.ones(X_c.shape)
 
-        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_c, W: W_c}), mu_c, sigma_c, phi_c)
+        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_c, W: W_c, G: G_c}), mu_c, sigma_c, phi_c)
         sess.close()
         return clusters
 
@@ -671,6 +749,8 @@ class VADER:
         if W_test is None:
             W_test = np.ones(X_test.shape)
 
+        G_test = np.ones(X_test.shape)
+
         if self.seed is not None:
             np.random.seed(self.seed)
 
@@ -678,8 +758,9 @@ class VADER:
 
         X = graph.get_tensor_by_name("X_input:0")
         W = graph.get_tensor_by_name("W_input:0")
+        G = graph.get_tensor_by_name("G_input:0")
         x_output = graph.get_tensor_by_name("x_output:0")
 
-        pred = x_output.eval(feed_dict={X: X_test, W: W_test})
+        pred = x_output.eval(feed_dict={X: X_test, W: W_test, G: G_test})
         sess.close()
         return pred
