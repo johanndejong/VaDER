@@ -623,9 +623,9 @@ class VADER:
         X = graph.get_tensor_by_name("X_input:0")
         W = graph.get_tensor_by_name("W_input:0")
         G = graph.get_tensor_by_name("G_input:0")
-        if phi_c is None:
+        if mu_c is None:
             mu_c = graph.get_tensor_by_name("mu_c:0").eval()
-        if phi_c is None:
+        if sigma_c is None:
             sigma_c = graph.get_tensor_by_name("sigma_c:0").eval()
         if phi_c is None:
             phi_c = graph.get_tensor_by_name("phi_c:0").eval()
