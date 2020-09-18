@@ -1,6 +1,6 @@
 import tensorflow as tf
 from functools import partial
-from sklearn.utils.linear_assignment_ import linear_assignment
+from scipy.optimize import linear_sum_assignment as linear_assignment
 from scipy.stats import norm
 import sys
 import os
@@ -34,7 +34,8 @@ class VADER:
                 performance when a ground truth clustering is available. It does not affect training, and can be omitted
                  if no ground truth is available. (default: None)
             n_hidden : int
-                The hidden layers. List of length >= 1. Specification of the number of nodes in the hidden layers.
+                The hidden layers. List of length >= 1. Specification of the number of nodes in the hidden layers. For
+                example, specifying [a, b, c] will lead to an architecture with layer sizes a -> b -> c -> b -> a.
                 (default: [12, 2])
             k : int
                 Number of mixture components. (default: 3)
@@ -301,7 +302,7 @@ class VADER:
             w = np.zeros((D, D), dtype=np.int64)
             for i in range(Y_pred.size):
                 w[Y_pred[i], Y[i]] += 1
-            ind = linear_assignment(w.max() - w)
+            ind = np.transpose(np.asarray(linear_assignment(w.max() - w)))
             return sum([w[i, j] for i, j in ind]) * 1.0 / Y_pred.size, np.array(w)
 
         y_pred = np.array(y_pred, np.int32)

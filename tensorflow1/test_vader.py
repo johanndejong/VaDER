@@ -1,5 +1,7 @@
 import numpy as np
 import os
+import sys
+sys.path.append(os.getcwd())
 from vader import VADER
 
 save_path = os.path.join('test_vader', 'vader.ckpt')
@@ -44,4 +46,33 @@ vader.fit(n_epoch=50, verbose=True)
 c = vader.cluster(X_train)
 # get the re-constructions
 p = vader.predict(X_train)
+# compute the loss given the network
+l = vader.get_loss(X_train)
+
+# Run VaDER non-recurrently (ordinary VAE with GM prior)
+nt = int(8)
+ns = int(2e2)
+sigma = np.diag(np.repeat(2, nt))
+mu1 = np.repeat(-1, nt)
+mu2 = np.repeat(1, nt)
+a1 = np.random.multivariate_normal(mu1, sigma, ns)
+a2 = np.random.multivariate_normal(mu2, sigma, ns)
+X_train = np.concatenate((a1, a2), axis=0)
+y_train = np.repeat([0, 1], ns)
+ii = np.random.permutation(ns * 2)
+X_train = X_train[ii,:]
+y_train = y_train[ii]
+vader = VADER(X_train=X_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=2,
+              learning_rate=1e-3, output_activation=None, recurrent=False, batch_size=16)
+# pre-train without latent loss
+vader.pre_fit(n_epoch=10, verbose=True)
+# train with latent loss
+vader.fit(n_epoch=50, verbose=True)
+# get the clusters
+c = vader.cluster(X_train)
+# get the re-constructions
+p = vader.predict(X_train)
+# compute the loss given the network
+l = vader.get_loss(X_train)
+
 
