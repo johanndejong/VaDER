@@ -30,20 +30,20 @@ def encode_monolayer_recurrent(X, D, I, cell_type, n_hidden):
     X = [tf.squeeze(t, [1]) for t in tf.split(X, D, 1)]
     if cell_type == "LSTM":
         encoder = tf.nn.rnn_cell.LSTMCell(
-            num_units=n_hidden + n_hidden,  # one for mu, one for sigma
+            num_units=n_hidden + n_hidden,  # one for mu, one for sigma2
             activation=tf.nn.tanh, name="encoder", use_peepholes=True
         )
         (_, (_, hidden)) = tf.nn.static_rnn(encoder, X, dtype=tf.float32)
     else:
         encoder = tf.nn.rnn_cell.GRUCell(
-            num_units=n_hidden + n_hidden,  # one for mu, one for sigma
+            num_units=n_hidden + n_hidden,  # one for mu, one for sigma2
             activation=tf.nn.tanh, name="encoder"
         )
         (_, hidden) = tf.nn.static_rnn(encoder, X, dtype=tf.float32)
 
     mu = tf.identity(hidden[:, :n_hidden], name="mu_tilde")
-    log_sigma = tf.identity(hidden[:, n_hidden:], name="log_sigma_tilde")
-    return mu, log_sigma
+    log_sigma2 = tf.identity(hidden[:, n_hidden:], name="log_sigma2_tilde")
+    return mu, log_sigma2
 
 
 # encode
@@ -64,9 +64,9 @@ def encode_multilayer_recurrent(X, D, I, cell_type, n_hidden):
     for n in n_hidden[1:-1]:
         hidden = my_dense_layer(hidden, n)
     mu = tf.identity(my_dense_layer(hidden, n_hidden[-1], activation=None), name="mu_tilde")
-    log_sigma = tf.identity(my_dense_layer(hidden, n_hidden[-1], activation=None),
-                            name="log_sigma_tilde")
-    return mu, log_sigma
+    log_sigma2 = tf.identity(my_dense_layer(hidden, n_hidden[-1], activation=None),
+                            name="log_sigma2_tilde")
+    return mu, log_sigma2
 
 
 # decode
@@ -123,8 +123,8 @@ def encode_nonrecurrent(X, n_hidden):
     for n in n_hidden[:-1]:
         hidden = my_dense_layer(hidden, n)
     mu = tf.identity(my_dense_layer(hidden, n_hidden[-1], activation=None), name="mu_tilde")
-    log_sigma = tf.identity(my_dense_layer(hidden, n_hidden[-1], activation=None), name="log_sigma_tilde")
-    return mu, log_sigma
+    log_sigma2 = tf.identity(my_dense_layer(hidden, n_hidden[-1], activation=None), name="log_sigma2_tilde")
+    return mu, log_sigma2
 
 
 # decode

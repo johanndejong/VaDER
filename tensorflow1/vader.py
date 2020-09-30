@@ -1,7 +1,7 @@
 import tensorflow as tf
 from functools import partial
 from scipy.optimize import linear_sum_assignment as linear_assignment
-from scipy.stats import norm
+from scipy.stats import multivariate_normal
 import sys
 import os
 import numpy as np
@@ -188,8 +188,8 @@ class VADER:
             return losses.reconstruction_loss(X, x, x_raw, W, self.output_activation, self.D, self.I, self.eps)
 
         # latent loss function
-        def latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde):
-            return losses.latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde, self.K, self.eps)
+        def latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde):
+            return losses.latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, self.K, self.eps)
 
         tf.reset_default_graph()
         graph = tf.get_default_graph()
@@ -211,8 +211,8 @@ class VADER:
             alpha_t = tf.placeholder_with_default(tf.convert_to_tensor(self.alpha), (), name="alpha_input")
             mu_c_unscaled = tf.get_variable("mu_c_unscaled", [self.K, self.n_hidden[-1]], dtype=tf.float32, trainable=True)
             mu_c = tf.identity(mu_c_unscaled, name="mu_c")
-            sigma_c_unscaled = tf.get_variable("sigma_c_unscaled", shape=[self.K, self.n_hidden[-1]], dtype=tf.float32, trainable=True)
-            sigma_c = tf.nn.softplus(sigma_c_unscaled, name="sigma_c")
+            sigma2_c_unscaled = tf.get_variable("sigma2_c_unscaled", shape=[self.K, self.n_hidden[-1]], dtype=tf.float32, trainable=True)
+            sigma2_c = tf.nn.softplus(sigma2_c_unscaled, name="sigma2_c")
             if phi is None:
                 phi_c_unscaled = tf.get_variable("phi_c_unscaled", shape=[self.K], dtype=tf.float32, trainable=True, initializer=tf.constant_initializer(1))
             else: # set phi_c to some constant provided by the user
@@ -223,13 +223,13 @@ class VADER:
             # Treat W as an indicator for nonmissingness (1: nonmissing; 0: missing)
             if ~np.all(self.W == 1.0) and np.all(np.logical_or(self.W == 0.0, self.W == 1.0)):
                 XW = tf.multiply(X, W) + tf.multiply(A, (1.0 - W))
-                mu_tilde, log_sigma_tilde = g(XW)
+                mu_tilde, log_sigma2_tilde = g(XW)
             else:
-                mu_tilde, log_sigma_tilde = g(X)
+                mu_tilde, log_sigma2_tilde = g(X)
 
             # sample from the mixture component
-            noise = tf.random_normal(tf.shape(log_sigma_tilde), dtype=tf.float32)
-            z = tf.add(mu_tilde, tf.exp(log_sigma_tilde / 2) * noise, name="z")
+            noise = tf.random_normal(tf.shape(log_sigma2_tilde), dtype=tf.float32)
+            z = tf.add(mu_tilde, tf.exp(0.5 * log_sigma2_tilde) * noise, name="z")
 
             # decode
             x, x_raw = f(z)
@@ -240,7 +240,7 @@ class VADER:
 
             lat_loss = tf.cond(
                 tf.greater(alpha_t, tf.convert_to_tensor(0.0)),
-                lambda: tf.multiply(alpha_t, latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde)), # variational
+                lambda: tf.multiply(alpha_t, latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde)), # variational
                 lambda: tf.convert_to_tensor(0.0) # non-variational
             )
             lat_loss = tf.identity(lat_loss, name="latent_loss")
@@ -288,12 +288,24 @@ class VADER:
         graph = tf.get_default_graph()
         return sess, saver, graph
 
-    def _cluster(self, mu_t, mu, sigma, phi):
-        def f(mu_t, mu, sigma, phi):
+    # def _cluster(self, mu_t, mu, sigma2, phi):
+    #     def f(mu_t, mu, sigma2, phi):
+    #         # the covariance matrix is diagonal, so we can just take the product
+    #         p = np.log(self.eps + phi) + np.sum(np.log(self.eps + norm.pdf(mu_t, loc=mu, scale=np.sqrt(sigma2))), axis=1)
+    #         return np.argmax(p)
+    #     return np.array([f(mu_t[i], mu, sigma2, phi) for i in np.arange(mu_t.shape[0])])
+
+    def _cluster(self, mu_t, mu, sigma2, phi):
+        # import pickle
+        # pickle.dump(mu_t, open( "mu_t.pickle", "wb" ) )
+        # pickle.dump(mu, open( "mu.pickle", "wb" ) )
+        # pickle.dump(sigma2, open( "sigma2.pickle", "wb" ) )
+        # pickle.dump(phi, open( "phi.pickle", "wb" ) )
+        def f(mu_t, mu, sigma2, phi):
             # the covariance matrix is diagonal, so we can just take the product
-            p = np.log(self.eps + phi) + np.sum(np.log(self.eps + norm.pdf(mu_t, loc=mu, scale=np.sqrt(sigma))), axis=1)
-            return np.argmax(p)
-        return np.array([f(mu_t[i], mu, sigma, phi) for i in np.arange(mu_t.shape[0])])
+            return np.log(self.eps + phi) + np.log(self.eps + multivariate_normal.pdf(mu_t, mean=mu, cov=np.diag(sigma2)))
+        p = np.array([f(mu_t, mu[i], sigma2[i], phi[i]) for i in np.arange(mu.shape[0])])
+        return np.argmax(p, axis=0)
 
     def _accuracy(self, y_pred, y_true):
         def cluster_acc(Y_pred, Y):
@@ -320,12 +332,12 @@ class VADER:
         alpha_t = graph.get_tensor_by_name("alpha_input:0")
         z = graph.get_tensor_by_name("z:0")
         x_output = graph.get_tensor_by_name("x_output:0")
-        sigma_c = graph.get_tensor_by_name("sigma_c:0")
+        sigma2_c = graph.get_tensor_by_name("sigma2_c:0")
         mu_c = graph.get_tensor_by_name("mu_c:0")
         mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
-        log_sigma_tilde = graph.get_tensor_by_name("log_sigma_tilde:0")
+        log_sigma2_tilde = graph.get_tensor_by_name("log_sigma2_tilde:0")
         phi_c = graph.get_tensor_by_name("phi_c:0")
-        return training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde
+        return training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde
 
     def _get_batch(self, batch_size):
         ii = np.random.choice(np.arange(self.X.shape[0]), batch_size, replace=False)
@@ -340,14 +352,14 @@ class VADER:
 
     def _print_progress(self, epoch, sess, graph):
         X_batch, y_batch, W_batch, G_batch = self._get_batch(min(10 * self.batch_size, self.X.shape[0]))
-        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(
+        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde = self._get_vars(
             graph)
         loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss],
                                                                       feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha})
         self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
         self.latent_loss = np.append(self.latent_loss, latent_loss_val)
         self.loss = np.append(self.loss, loss_val)
-        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha}), mu_c.eval(), sigma_c.eval(),
+        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha}), mu_c.eval(), sigma2_c.eval(),
                                  phi_c.eval())
         # if y_batch is not None:
         if y_batch is not None:
@@ -397,7 +409,7 @@ class VADER:
         #     lr_t = graph.get_tensor_by_name("learning_rate:0")
 
         writer = tf.summary.FileWriter(self.save_path, sess.graph)
-        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(graph)
+        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde = self._get_vars(graph)
         X = graph.get_tensor_by_name("X_input:0")
         if verbose:
             self._print_progress(-1, sess, graph)
@@ -455,7 +467,7 @@ class VADER:
             # get GMM parameters
             phi = np.log(gmm.weights_ + self.eps) # inverse softmax
             mu = gmm.means_
-            sigma = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
+            sigma2 = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
 
             # initialize mixture components
             sess, saver, graph = self._restore_session()
@@ -463,8 +475,8 @@ class VADER:
                 return [v for v in tf.global_variables() if v.name == varname][0]
             mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
             sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(mu, dtype=tf.float32)))
-            sigma_c_unscaled = my_get_variable("sigma_c_unscaled:0")
-            sess.run(sigma_c_unscaled.assign(tf.convert_to_tensor(sigma, dtype=tf.float32)))
+            sigma2_c_unscaled = my_get_variable("sigma2_c_unscaled:0")
+            sess.run(sigma2_c_unscaled.assign(tf.convert_to_tensor(sigma2, dtype=tf.float32)))
             phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
             sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi, dtype=tf.float32)))
             saver.save(sess, self.save_path)
@@ -509,7 +521,7 @@ class VADER:
         sess.close()
         return latent
 
-    def get_loss(self, X_c, W_c=None, mu_c=None, sigma_c=None, phi_c=None):
+    def get_loss(self, X_c, W_c=None, mu_c=None, sigma2_c=None, phi_c=None):
         '''
             Calculate the loss for specific input data and Gaussian mixture parameters.
 
@@ -525,7 +537,7 @@ class VADER:
             mu_c : float
                 The mixture component means, one for each self.K. Numpy array of dimensions [self.K, self.n_hidden[-1]].
                 If None, then the means of this VADER object are used. (default: None)
-            sigma_c : float
+            sigma2_c : float
                 The mixture component variances, representing diagonal covariance matrices, one for each self.K. Numpy
                 array of dimensions [self.K, self.n_hidden[-1]]. If None, then the variances of this VADER object are
                 used. (default: None)
@@ -556,11 +568,11 @@ class VADER:
             mu_c_old = mu_c_unscaled.eval()
             sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(mu_c_new, dtype=tf.float32)))
 
-        sigma_c_unscaled = my_get_variable("sigma_c_unscaled:0")
-        if sigma_c is not None:
-            sigma_c_new = sigma_c
-            sigma_c_old = sigma_c_unscaled.eval()
-            sess.run(sigma_c_unscaled.assign(tf.contrib.distributions.softplus_inverse(tf.convert_to_tensor(sigma_c_new, dtype=tf.float32))))
+        sigma2_c_unscaled = my_get_variable("sigma2_c_unscaled:0")
+        if sigma2_c is not None:
+            sigma2_c_new = sigma2_c
+            sigma2_c_old = sigma2_c_unscaled.eval()
+            sess.run(sigma2_c_unscaled.assign(tf.contrib.distributions.softplus_inverse(tf.convert_to_tensor(sigma2_c_new, dtype=tf.float32))))
 
         phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
         if phi_c is not None:
@@ -591,7 +603,7 @@ class VADER:
         sess.close()
         return A
 
-    def cluster(self, X_c, W_c=None, mu_c=None, sigma_c=None, phi_c=None):
+    def cluster(self, X_c, W_c=None, mu_c=None, sigma2_c=None, phi_c=None):
         '''
             Cluster input data using this VADER object.
 
@@ -607,7 +619,7 @@ class VADER:
             mu_c : float
                 The mixture component means, one for each self.K. Numpy array of dimensions [self.K, self.n_hidden[-1]].
                 If None, then the means of this VADER object are used. (default: None)
-            sigma_c : float
+            sigma2_c : float
                 The mixture component variances, representing diagonal covariance matrices, one for each self.K. Numpy
                 array of dimensions [self.K, self.n_hidden[-1]]. If None, then the variances of this VADER object are
                 used. (default: None)
@@ -626,8 +638,8 @@ class VADER:
         G = graph.get_tensor_by_name("G_input:0")
         if mu_c is None:
             mu_c = graph.get_tensor_by_name("mu_c:0").eval()
-        if sigma_c is None:
-            sigma_c = graph.get_tensor_by_name("sigma_c:0").eval()
+        if sigma2_c is None:
+            sigma2_c = graph.get_tensor_by_name("sigma2_c:0").eval()
         if phi_c is None:
             phi_c = graph.get_tensor_by_name("phi_c:0").eval()
 
@@ -635,7 +647,7 @@ class VADER:
             W_c = np.ones(X_c.shape)
         G_c = np.ones(X_c.shape)
 
-        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_c, W: W_c, G: G_c}), mu_c, sigma_c, phi_c)
+        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_c, W: W_c, G: G_c}), mu_c, sigma2_c, phi_c)
         sess.close()
         return clusters
 
@@ -666,19 +678,19 @@ class VADER:
 
             Returns
             -------
-            Dictionary with three components, "mu", "sigma_sq", "phi".
+            Dictionary with three components, "mu", "sigma2_sq", "phi".
         '''
         if self.seed is not None:
             np.random.seed(self.seed)
 
         sess, saver, graph = self._restore_session()
-        sigma_c = graph.get_tensor_by_name("sigma_c:0")
+        sigma2_c = graph.get_tensor_by_name("sigma2_c:0")
         mu_c = graph.get_tensor_by_name("mu_c:0")
         phi_c = graph.get_tensor_by_name("phi_c:0")
 
         res = {
             "mu": mu_c.eval(),
-            "sigma_sq": sigma_c.eval(),
+            "sigma2_sq": sigma2_c.eval(),
             "phi": phi_c.eval()
         }
 
@@ -703,7 +715,7 @@ class VADER:
 
         z = graph.get_tensor_by_name("z:0")
         x = graph.get_tensor_by_name("x_output:0")
-        sigma_c = graph.get_tensor_by_name("sigma_c:0")
+        sigma2_c = graph.get_tensor_by_name("sigma2_c:0")
         mu_c = graph.get_tensor_by_name("mu_c:0")
         phi_c = graph.get_tensor_by_name("phi_c:0")
 
@@ -716,7 +728,7 @@ class VADER:
             ii = np.flatnonzero(c == k)
             z_rnd = \
                 mu_c.eval()[None, k, :] + \
-                np.sqrt(sigma_c.eval())[None, k, :] * \
+                np.sqrt(sigma2_c.eval())[None, k, :] * \
                 np.random.normal(size=[ii.shape[0], self.n_hidden[-1]])
             # gen[ii,:] = x.eval(feed_dict={z: z_rnd})
             if self.recurrent:

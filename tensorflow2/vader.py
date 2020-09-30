@@ -1,14 +1,14 @@
 import tensorflow as tf
 from functools import partial
 from scipy.optimize import linear_sum_assignment as linear_assignment
-from scipy.stats import norm
+from sklearn import metrics
+from scipy.stats import multivariate_normal
 import sys
 import os
 import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-import losses
-import layers
+from vadermodel import VaderModel
 
 class VADER:
     '''
@@ -16,7 +16,7 @@ class VADER:
     '''
     def __init__(self, X_train, W_train=None, y_train=None, n_hidden=[12, 2], k=3, groups=None, output_activation=None,
         batch_size = 32, learning_rate=1e-3, alpha=1.0, phi=None, cell_type="LSTM", recurrent=True,
-        save_path=os.path.join('vader', 'vader.ckpt'), eps=1e-10, seed=None, n_thread=0):
+        save_path=None, eps=1e-10, seed=None, n_thread=0):
         '''
             Constructor for class VADER
 
@@ -96,14 +96,12 @@ class VADER:
                 Learning rate for training.
             alpha : float
                 Weight of the latent loss, relative to the reconstruction loss.
-            phi : float
-                Initial values for the mixture component probabilities. List of length k.
             cell_type : str
                 Cell type of the recurrent neural network. Currently only LSTM is supported.
             recurrent : bool
                 Train a recurrent autoencoder, or a non-recurrent autoencoder?
             save_path : str
-                Location to store the Tensorflow checkpoint files.
+                Location to save the Tensorflow model.
             eps : float
                 Small value used for numerical stability in logarithmic computations, divisions, etc.
             seed : int
@@ -120,25 +118,38 @@ class VADER:
                 The current training latent loss of this VADER object.
             reconstruction_loss : float
                 The current training reconstruction loss of this VADER object.
+            accuracy : float
+                If y_train is not none the current accuracy of this VADER object.
+            cluster_purity : float
+                If y_train is not none the current cluster purity of this VADER object.
+            gmm : dict
+                The current GMM in the latent space of the VaDER model.
             D : int
                 self.X.shape[1]. The number of time points if self.recurrent is True, otherwise the number of variables.
+            G : float
+                Groups weights proportional to group sizes as specified in groups attribute.
             I : integer
                 X_train.shape[2]. The number of variables if self.recurrent is True, otherwise not defined.
+            model :
+                The VaDER model
+            optimizer :
+                The optimizer used for training the model
         '''
 
         if seed is not None:
             np.random.seed(seed)
 
-        self.D = X_train.shape[1]  # dimensionality of input/output
-        self.X = X_train
+        # experiment: encode as np.array
+        self.D = np.array(X_train.shape[1], dtype=np.int32)  # dimensionality of input/output
+        self.X = X_train.astype(np.float32)
         if W_train is not None:
-            self.W = W_train
+            self.W = W_train.astype(np.int32)
         else:
-            self.W = np.ones(X_train.shape, dtype=np.float32)
+            self.W = np.ones(X_train.shape, np.int32)
         if y_train is not None:
-            self.y = np.asarray(y_train, np.int32)
+            self.y = np.array(y_train, np.int32)
         else:
-            self.y = y_train
+            self.y = None
         self.save_path = save_path
         self.eps = eps
         self.alpha = alpha  # weight for the latent loss (alpha times the reconstruction loss weight)
@@ -167,208 +178,37 @@ class VADER:
         self.loss = np.array([])
         self.reconstruction_loss = np.array([])
         self.latent_loss = np.array([])
+        self.accuracy = np.array([])
+        self.cluster_purity = np.array([])
+        self.gmm = {'mu': None, 'sigma2': None, 'phi': None}
         self.n_param = None
         self.cell_type = cell_type
         self.recurrent = recurrent
+        # experiment: encode as np.array
         if self.recurrent:
-            self.I = X_train.shape[2]  # multivariate dimensions
+            self.I = np.array(X_train.shape[2], dtype=np.int32)  # multivariate dimensions
         else:
-            self.I = 1
+            self.I = np.array(1, dtype=np.int32)
 
-        # encoder function
-        def g(X):
-            return layers.encode(X, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent)
+        if self.seed is not None:
+            tf.random.set_seed(self.seed)
 
-        # decoder function
-        def f(z):
-            return layers.decode(z, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent, self.output_activation)
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, beta_1=0.9, beta_2=0.999, name="optimizer")
 
-        # reconstruction loss function
-        def reconstruction_loss(X, x, x_raw, W):
-            return losses.reconstruction_loss(X, x, x_raw, W, self.output_activation, self.D, self.I, self.eps)
+        self.model = VaderModel(
+            self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
+            self.output_activation)
 
-        # latent loss function
-        def latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde):
-            return losses.latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde, self.K, self.eps)
 
-        tf.compat.v1.reset_default_graph()
-        graph = tf.compat.v1.get_default_graph()
 
-        with graph.as_default():
-            if self.seed is not None:
-                tf.compat.v1.set_random_seed(self.seed)
+        # the state of the untrained model
+        self._update_state(self.model)
+        self.n_param = np.sum([np.product([xi for xi in x.shape]) for x in self.model.trainable_variables])
 
-            if self.recurrent:
-                X = tf.compat.v1.placeholder(tf.float32, [None, self.D, self.I], name="X_input")
-                W = tf.compat.v1.placeholder(tf.float32, [None, self.D, self.I], name="W_input")
-                G = tf.compat.v1.placeholder(tf.float32, [None, self.D, self.I], name="G_input")
-                A = tf.compat.v1.get_variable("A", dtype=tf.float32, trainable=True, initializer=self._initialize_imputation(self.X, self.W))
-            else:
-                X = tf.compat.v1.placeholder(tf.float32, [None, self.D], name="X_input")
-                W = tf.compat.v1.placeholder(tf.float32, [None, self.D], name="W_input")
-                G = tf.compat.v1.placeholder(tf.float32, [None, self.D], name="G_input")
-                A = tf.compat.v1.get_variable("A", dtype=tf.float32, trainable=True, initializer=self._initialize_imputation(self.X, self.W))
-            alpha_t = tf.compat.v1.placeholder_with_default(tf.convert_to_tensor(value=self.alpha), (), name="alpha_input")
-            mu_c_unscaled = tf.compat.v1.get_variable("mu_c_unscaled", [self.K, self.n_hidden[-1]], dtype=tf.float32, trainable=True)
-            mu_c = tf.identity(mu_c_unscaled, name="mu_c")
-            sigma_c_unscaled = tf.compat.v1.get_variable("sigma_c_unscaled", shape=[self.K, self.n_hidden[-1]], dtype=tf.float32, trainable=True)
-            sigma_c = tf.nn.softplus(sigma_c_unscaled, name="sigma_c")
-            if phi is None:
-                phi_c_unscaled = tf.compat.v1.get_variable("phi_c_unscaled", shape=[self.K], dtype=tf.float32, trainable=True, initializer=tf.compat.v1.constant_initializer(1))
-            else: # set phi_c to some constant provided by the user
-                phi_c_unscaled = tf.compat.v1.get_variable("phi_c_unscaled", dtype=tf.float32, trainable=False, initializer=tf.math.log(tf.constant(phi)))
-            phi_c = tf.nn.softmax(phi_c_unscaled, name="phi_c")
+        if self.save_path is not None:
+            tf.keras.models.save_model(self.model, self.save_path, save_format="tf")
 
-            # encode
-            # Treat W as an indicator for nonmissingness (1: nonmissing; 0: missing)
-            if ~np.all(self.W == 1.0) and np.all(np.logical_or(self.W == 0.0, self.W == 1.0)):
-                XW = tf.multiply(X, W) + tf.multiply(A, (1.0 - W))
-                mu_tilde, log_sigma_tilde = g(XW)
-            else:
-                mu_tilde, log_sigma_tilde = g(X)
-
-            # sample from the mixture component
-            noise = tf.random.normal(tf.shape(input=log_sigma_tilde), dtype=tf.float32)
-            z = tf.add(mu_tilde, tf.exp(log_sigma_tilde / 2) * noise, name="z")
-
-            # decode
-            x, x_raw = f(z)
-
-            # calculate the loss
-            rec_loss = reconstruction_loss(X, x, x_raw, G * W)
-            rec_loss = tf.identity(rec_loss, name="reconstruction_loss")
-
-            lat_loss = tf.cond(
-                pred=tf.greater(alpha_t, tf.convert_to_tensor(value=0.0)),
-                true_fn=lambda: tf.multiply(alpha_t, latent_loss(z, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde)), # variational
-                false_fn=lambda: tf.convert_to_tensor(value=0.0) # non-variational
-            )
-            lat_loss = tf.identity(lat_loss, name="latent_loss")
-
-            loss = tf.add(rec_loss, lat_loss, name="loss")
-
-            optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self.learning_rate, beta1=0.9, beta2=0.999, name="optimizer")
-            gradients, variables = zip(*optimizer.compute_gradients(loss))
-            training_op = optimizer.apply_gradients(zip(gradients, variables), name="training_op")
-
-            init = tf.compat.v1.global_variables_initializer()
-            self.n_param = np.sum([np.product([xi.value for xi in x.get_shape()]) for x in tf.compat.v1.trainable_variables()])
-            saver = tf.compat.v1.train.Saver()
-
-        with tf.compat.v1.Session(graph=graph, config=tf.compat.v1.ConfigProto(
-            intra_op_parallelism_threads=self.n_thread, inter_op_parallelism_threads=self.n_thread)) as sess:
-            init.run()
-            saver.save(sess, self.save_path)
-
-    def _initialize_imputation(self, X, W):
-        # average per time point, variable
-        W_A = np.sum(W, axis=0)
-        A = np.sum(X * W, axis=0)
-        A[W_A>0] = A[W_A>0] / W_A[W_A>0]
-        # if not available, then average across entire variable
-        if self.recurrent:
-            for i in np.arange(A.shape[0]):
-                for j in np.arange(A.shape[1]):
-                    if W_A[i,j] == 0:
-                        A[i,j] = np.sum(X[:,:,j]) / np.sum(W[:,:,j])
-                        W_A[i,j] = 1
-        # if not available, then average across all variables
-        A[W_A==0] = np.mean(X[W==1])
-        return A.astype(np.float32)
-        # return np.zeros(X.shape[1:], np.float32)
-
-    def _restore_session(self):
-        tf.compat.v1.reset_default_graph()
-        sess = tf.compat.v1.InteractiveSession(config=tf.compat.v1.ConfigProto(
-            intra_op_parallelism_threads=self.n_thread,
-            inter_op_parallelism_threads=self.n_thread
-        ))
-        saver = tf.compat.v1.train.import_meta_graph(self.save_path + ".meta")
-        saver.restore(sess, self.save_path)
-        graph = tf.compat.v1.get_default_graph()
-        return sess, saver, graph
-
-    def _cluster(self, mu_t, mu, sigma, phi):
-        def f(mu_t, mu, sigma, phi):
-            # the covariance matrix is diagonal, so we can just take the product
-            p = np.log(self.eps + phi) + np.sum(np.log(self.eps + norm.pdf(mu_t, loc=mu, scale=np.sqrt(sigma))), axis=1)
-            return np.argmax(p)
-        return np.array([f(mu_t[i], mu, sigma, phi) for i in np.arange(mu_t.shape[0])])
-
-    def _accuracy(self, y_pred, y_true):
-        def cluster_acc(Y_pred, Y):
-            assert Y_pred.size == Y.size
-            D = max(Y_pred.max(), Y.max()) + 1
-            w = np.zeros((D, D), dtype=np.int64)
-            for i in range(Y_pred.size):
-                w[Y_pred[i], Y[i]] += 1
-            ind = np.transpose(np.asarray(linear_assignment(w.max() - w)))
-            return sum([w[i, j] for i, j in ind]) * 1.0 / Y_pred.size, np.array(w)
-
-        y_pred = np.array(y_pred, np.int32)
-        y_true = np.array(y_true, np.int32)
-        return cluster_acc(y_pred, y_true)
-
-    def _get_vars(self, graph):
-        training_op = graph.get_operation_by_name("training_op")
-        loss = graph.get_tensor_by_name("loss:0")
-        rec_loss = graph.get_tensor_by_name("reconstruction_loss:0")
-        lat_loss = graph.get_tensor_by_name("latent_loss:0")
-        X = graph.get_tensor_by_name("X_input:0")
-        W = graph.get_tensor_by_name("W_input:0")
-        G = graph.get_tensor_by_name("G_input:0")
-        alpha_t = graph.get_tensor_by_name("alpha_input:0")
-        z = graph.get_tensor_by_name("z:0")
-        x_output = graph.get_tensor_by_name("x_output:0")
-        sigma_c = graph.get_tensor_by_name("sigma_c:0")
-        mu_c = graph.get_tensor_by_name("mu_c:0")
-        mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
-        log_sigma_tilde = graph.get_tensor_by_name("log_sigma_tilde:0")
-        phi_c = graph.get_tensor_by_name("phi_c:0")
-        return training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde
-
-    def _get_batch(self, batch_size):
-        ii = np.random.choice(np.arange(self.X.shape[0]), batch_size, replace=False)
-        X_batch = self.X[ii,]
-        if self.y is not None:
-            y_batch = self.y[ii]
-        else:
-            y_batch = None
-        W_batch = self.W[ii,]
-        G_batch = self.G[ii,]
-        return X_batch, y_batch, W_batch, G_batch
-
-    def _print_progress(self, epoch, sess, graph):
-        X_batch, y_batch, W_batch, G_batch = self._get_batch(min(10 * self.batch_size, self.X.shape[0]))
-        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(
-            graph)
-        loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss],
-                                                                      feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha})
-        self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
-        self.latent_loss = np.append(self.latent_loss, latent_loss_val)
-        self.loss = np.append(self.loss, loss_val)
-        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha}), mu_c.eval(), sigma_c.eval(),
-                                 phi_c.eval())
-        # if y_batch is not None:
-        if y_batch is not None:
-            acc, _ = self._accuracy(clusters, y_batch)
-            print(epoch,
-                  "tot_loss:", "%.2f" % round(loss_val, 2),
-                  "\trec_loss:", "%.2f" % round(reconstruction_loss_val, 2),
-                  "\tlat_loss:", "%.2f" % round(latent_loss_val, 2),
-                  "\tacc:", "%.2f" % round(acc, 2),
-                  flush=True
-                  )
-        else:
-            print(epoch,
-                  "tot_loss:", "%.2f" % round(loss_val, 2),
-                  "\trec_loss:", "%.2f" % round(reconstruction_loss_val, 2),
-                  "\tlat_loss:", "%.2f" % round(latent_loss_val, 2),
-                  flush=True
-                  )
-        return 0
-
-    def fit(self, n_epoch=10, learning_rate=None, verbose=False):
+    def fit(self, n_epoch=10, learning_rate=None, verbose=False, exclude_variables=None):
         '''
             Train a VADER object.
 
@@ -381,43 +221,47 @@ class VADER:
                 (NB: not currently used!)
             verbose : bool
                 Print progress? (default: False)
+            exclude_variables: list of character
+                List of variables to exclude in computing the gradient
 
             Returns
             -------
             0 if successful
         '''
+
+        @tf.function
+        def train_step(X, W, G):
+            GW = G * tf.cast(W, dtype=G.dtype)
+            with tf.GradientTape() as tape:
+                x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde = self.model((X, W), training=True)
+                rec_loss = self._reconstruction_loss(
+                    X, x, x_raw, GW, self.output_activation, self.D, self.I, self.eps)
+                if self.alpha > 0.0:
+                    lat_loss = self.alpha * self._latent_loss(
+                        z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, self.K, self.eps)
+                else:
+                    lat_loss = tf.convert_to_tensor(value=0.0)  # non-variational
+                loss = rec_loss + lat_loss
+            gradients = tape.gradient(loss, self.model.trainable_variables)
+            self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        self.n_epoch += n_epoch
-
-        sess, saver, graph = self._restore_session()
-
-        # if learning_rate is not None:
-        #     lr_t = graph.get_tensor_by_name("learning_rate:0")
-
-        writer = tf.compat.v1.summary.FileWriter(self.save_path, sess.graph)
-        training_op, loss, rec_loss, lat_loss, X, W, G, alpha_t, z, x_output, mu_c, sigma_c, phi_c, mu_tilde, log_sigma_tilde = self._get_vars(graph)
-        X = graph.get_tensor_by_name("X_input:0")
         if verbose:
-            self._print_progress(-1, sess, graph)
-        for epoch in range(n_epoch): # NOTE: explicitly not self.epoch in case of repeated calls to fit!
+            self._print_progress(self.model, -1)
+        for epoch in range(n_epoch):
             n_batches = self.X.shape[0] // self.batch_size
             for iteration in range(n_batches):
                 sys.stdout.flush()
                 X_batch, y_batch, W_batch, G_batch = self._get_batch(self.batch_size)
-                sess.run(training_op, feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha})
+                train_step(X_batch, W_batch, G_batch)
+            self._update_state(self.model)
+            self.n_epoch += 1
             if verbose:
-                self._print_progress(epoch, sess, graph)
-        loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss], feed_dict={X: self.X, W: self.W, G: self.G, alpha_t: self.alpha})
-        self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
-        self.latent_loss = np.append(self.latent_loss, latent_loss_val)
-        self.loss = np.append(self.loss, loss_val)
-        # if learning_rate is not None:
-        #     self.learning_rate = self_learning_rate
-        saver.save(sess, self.save_path)
-        writer.close()
-        sess.close()
+                self._print_progress(self.model, self.n_epoch)
+        if self.save_path is not None:
+            tf.keras.models.save_model(self.model, self.save_path, save_format="tf")
         return 0
 
     def pre_fit(self, n_epoch=10, learning_rate=None, verbose=False):
@@ -455,26 +299,159 @@ class VADER:
             # get GMM parameters
             phi = np.log(gmm.weights_ + self.eps) # inverse softmax
             mu = gmm.means_
-            sigma = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
+            sigma2 = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
 
             # initialize mixture components
-            sess, saver, graph = self._restore_session()
             def my_get_variable(varname):
-                return [v for v in tf.compat.v1.global_variables() if v.name == varname][0]
+                return [v for v in self.model.trainable_variables if v.name == varname][0]
             mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
-            sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(value=mu, dtype=tf.float32)))
-            sigma_c_unscaled = my_get_variable("sigma_c_unscaled:0")
-            sess.run(sigma_c_unscaled.assign(tf.convert_to_tensor(value=sigma, dtype=tf.float32)))
+            mu_c_unscaled.assign(tf.convert_to_tensor(value=mu, dtype=tf.float32))
+            sigma2_c_unscaled = my_get_variable("sigma2_c_unscaled:0")
+            sigma2_c_unscaled.assign(tf.convert_to_tensor(value=sigma2, dtype=tf.float32))
             phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
-            sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(value=phi, dtype=tf.float32)))
-            saver.save(sess, self.save_path)
-            sess.close()
+            phi_c_unscaled.assign(tf.convert_to_tensor(value=phi, dtype=tf.float32))
         except:
             warnings.warn("Failed to initialize VaDER with Gaussian mixture")
         finally:
             # restore the alpha
             self.alpha = alpha
         return ret
+
+    def _update_state(self, model):
+        X_batch, y_batch, W_batch, G_batch = self._get_batch(min(20 * self.batch_size, self.X.shape[0]))
+        x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde = model((X_batch, W_batch))
+        rec_loss = self._reconstruction_loss(
+            X_batch, x, x_raw, (G_batch * W_batch).astype(np.float32), self.output_activation, self.D, self.I, self.eps)
+        lat_loss = self._latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, self.K, self.eps)
+        loss = rec_loss + self.alpha * lat_loss
+        self.reconstruction_loss = np.append(self.reconstruction_loss, rec_loss)
+        self.latent_loss = np.append(self.latent_loss, lat_loss)
+        self.loss = np.append(self.loss, loss)
+        self.gmm['mu'] = mu_c.numpy()
+        self.gmm['sigma2'] = sigma2_c.numpy()
+        self.gmm['phi'] = phi_c.numpy()
+        if y_batch is not None:
+            clusters = self._cluster(mu_tilde, mu_c, sigma2_c, phi_c)
+            acc, _ = self._accuracy(clusters, y_batch)
+            self.accuracy = np.append(self.accuracy, acc)
+            pur = self._cluster_purity(clusters, y_batch)
+            self.cluster_purity = np.append(self.cluster_purity, pur)
+
+    @tf.function
+    def _reconstruction_loss(self, X, x, x_raw, W, output_activation, D, I, eps=1e-10):
+        # reconstruction loss: E[log p(x|z)]
+        if (output_activation == tf.nn.sigmoid):
+            rec_loss = tf.compat.v1.losses.sigmoid_cross_entropy(tf.clip_by_value(X, eps, 1 - eps), x_raw, W)
+        else:
+            rec_loss = tf.compat.v1.losses.mean_squared_error(X, x, W)
+
+        # re-scale the loss to the original dims (making sure it balances correctly with the latent loss)
+        num = tf.cast(tf.reduce_prod(input_tensor=tf.shape(input=W)), rec_loss.dtype)
+        den = tf.cast(tf.reduce_sum(input_tensor=W), rec_loss.dtype)
+        rec_loss = rec_loss * num / den
+        rec_loss = rec_loss * tf.cast(D, dtype=rec_loss.dtype) * tf.cast(I, dtype=rec_loss.dtype)
+
+        return rec_loss
+
+    @tf.function
+    def _latent_loss(self, z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, K, eps=1e-10):
+        sigma2_tilde = tf.math.exp(log_sigma2_tilde)
+        log_sigma2_c = tf.math.log(eps + sigma2_c)
+        if K == 1:  # ordinary VAE
+            latent_loss = tf.reduce_mean(input_tensor=0.5 * tf.reduce_sum(
+                input_tensor=sigma2_tilde + tf.square(mu_tilde) - 1 - log_sigma2_tilde,
+                axis=1
+            ))
+        else:
+            log_2pi = tf.math.log(2 * np.pi)
+            log_phi_c = tf.math.log(eps + phi_c)
+            def log_pdf(z):
+                def f(i):
+                    return - 0.5 * (log_sigma2_c[i] + log_2pi + tf.math.square(z - mu_c[i]) / sigma2_c[i])
+                    # return - tf.square(z - mu[i]) / 2.0 / (eps + sigma2[i]) - tf.math.log(
+                    #     eps + 2.0 * np.pi * sigma2[i]) / 2.0
+                return tf.transpose(a=tf.map_fn(f, np.arange(K), fn_output_signature=tf.float32), perm=[1, 0, 2])
+
+            log_p = log_phi_c + tf.reduce_sum(input_tensor=log_pdf(z), axis=2)
+            lse_p = tf.reduce_logsumexp(input_tensor=log_p, keepdims=True, axis=1)
+            log_gamma_c = log_p - lse_p
+
+            gamma_c = tf.exp(log_gamma_c)
+
+            # latent loss: E[log p(z|c) + log p(c) - log q(z|x) - log q(c|x)]
+            term1 = tf.math.log(eps + sigma2_c)
+            f2 = lambda i: sigma2_tilde / (eps + sigma2_c[i])
+            term2 = tf.transpose(a=tf.map_fn(f2, np.arange(K), fn_output_signature=tf.float32), perm=[1, 0, 2])
+            f3 = lambda i: tf.square(mu_tilde - mu_c[i]) / (eps + sigma2_c[i])
+            term3 = tf.transpose(a=tf.map_fn(f3, np.arange(K), fn_output_signature=tf.float32), perm=[1, 0, 2])
+
+            latent_loss1 = 0.5 * tf.reduce_sum(
+                input_tensor=gamma_c * tf.reduce_sum(input_tensor=term1 + term2 + term3, axis=2), axis=1)
+            # latent_loss2 = - tf.reduce_sum(gamma_c * tf.log(eps + phi_c / (eps + gamma_c)), axis=1)
+            latent_loss2 = - tf.reduce_sum(input_tensor=gamma_c * (log_phi_c - log_gamma_c), axis=1)
+            latent_loss3 = - 0.5 * tf.reduce_sum(input_tensor=1 + log_sigma2_tilde, axis=1)
+            # average across the samples
+            latent_loss1 = tf.reduce_mean(input_tensor=latent_loss1)
+            latent_loss2 = tf.reduce_mean(input_tensor=latent_loss2)
+            latent_loss3 = tf.reduce_mean(input_tensor=latent_loss3)
+            # add the different terms
+            latent_loss = latent_loss1 + latent_loss2 + latent_loss3
+        return latent_loss
+
+    def _cluster(self, mu_t, mu, sigma2, phi):
+        def f(mu_t, mu, sigma2, phi):
+            # the covariance matrix is diagonal, so we can just take the product
+            return np.log(self.eps + phi) + np.log(self.eps + multivariate_normal.pdf(mu_t, mean=mu, cov=np.diag(sigma2)))
+        p = np.array([f(mu_t, mu[i], sigma2[i], phi[i]) for i in np.arange(mu.shape[0])])
+        return np.argmax(p, axis=0)
+
+    def _cluster_purity(self, y_pred, y_true):
+        tab = metrics.cluster.contingency_matrix(y_true, y_pred)
+        return np.sum(np.amax(tab, axis=0)) / np.sum(tab)
+
+    def _accuracy(self, y_pred, y_true):
+        def cluster_acc(Y_pred, Y):
+            assert Y_pred.size == Y.size
+            D = max(Y_pred.max(), Y.max()) + 1
+            w = np.zeros((D, D), dtype=np.int32)
+            for i in range(Y_pred.size):
+                w[Y_pred[i], Y[i]] += 1
+            ind = np.transpose(np.asarray(linear_assignment(w.max() - w)))
+            return sum([w[i, j] for i, j in ind]) * 1.0 / Y_pred.size, np.array(w)
+
+        y_pred = np.array(y_pred, np.int32)
+        y_true = np.array(y_true, np.int32)
+        return cluster_acc(y_pred, y_true)
+
+    def _get_batch(self, batch_size):
+        ii = np.random.choice(np.arange(self.X.shape[0]), batch_size, replace=False)
+        X_batch = self.X[ii,]
+        if self.y is not None:
+            y_batch = self.y[ii]
+        else:
+            y_batch = None
+        W_batch = self.W[ii,]
+        G_batch = self.G[ii,]
+        return X_batch, y_batch, W_batch, G_batch
+
+    def _print_progress(self, model, epoch=-1):
+        if self.y is not None:
+            print(epoch,
+                  "tot_loss:", "%.2f" % round(self.loss[-1], 2),
+                  "\trec_loss:", "%.2f" % round(self.reconstruction_loss[-1], 2),
+                  "\tlat_loss:", "%.2f" % round(self.latent_loss[-1], 2),
+                  "\tacc:", "%.2f" % round(self.accuracy[-1], 2),
+                  "\tpur:", "%.2f" % round(self.cluster_purity[-1], 2),
+                  flush=True
+                  )
+        else:
+            print(epoch,
+                  "tot_loss:", "%.2f" % round(self.loss[-1], 2),
+                  "\trec_loss:", "%.2f" % round(self.reconstruction_loss[-1], 2),
+                  "\tlat_loss:", "%.2f" % round(self.latent_loss[-1], 2),
+                  flush=True
+                  )
+        return 0
 
     def map_to_latent(self, X_c, W_c=None, n_samp=1):
         '''
@@ -497,21 +474,12 @@ class VADER:
             numpy array containing the latent representations.
         '''
         if W_c is None:
-            W_c = np.ones(X_c.shape)
-        G_c = np.ones(X_c.shape)
-        sess, saver, graph = self._restore_session()
-        z = graph.get_tensor_by_name("z:0")
-        mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
-        X = graph.get_tensor_by_name("X_input:0")
-        W = graph.get_tensor_by_name("W_input:0")
-        G = graph.get_tensor_by_name("G_input:0")
-        latent = np.concatenate([z.eval(feed_dict={X: X_c, W: W_c, G: G_c}) for i in np.arange(n_samp)], axis=0)
-        sess.close()
-        return latent
+            W_c = np.ones(X_c.shape, dtype=np.float32)
+        return np.concatenate([self.model((X_c, W_c))[5] for i in np.arange(n_samp)], axis=0)
 
-    def get_loss(self, X_c, W_c=None, mu_c=None, sigma_c=None, phi_c=None):
+    def get_loss(self, X_c, W_c=None, mu_c=None, sigma2_c=None, phi_c=None):
         '''
-            Calculate the loss for specific input data and Gaussian mixture parameters.
+            Calculate the loss for specific input data.
 
             Parameters
             ----------
@@ -522,16 +490,6 @@ class VADER:
                 Missingness indicator. Numpy array with same dimensions as X_c. Entries in X_c for which the
                 corresponding entry in W_train equals 0 are treated as missing. More precisely, their specific numeric
                 value is completely ignored. If None, then no missingness is assumed. (default: None)
-            mu_c : float
-                The mixture component means, one for each self.K. Numpy array of dimensions [self.K, self.n_hidden[-1]].
-                If None, then the means of this VADER object are used. (default: None)
-            sigma_c : float
-                The mixture component variances, representing diagonal covariance matrices, one for each self.K. Numpy
-                array of dimensions [self.K, self.n_hidden[-1]]. If None, then the variances of this VADER object are
-                used. (default: None)
-            phi_c : float
-                The mixture component probabilities. List of length self.K. If None, then the component probabilities of
-                 this VADER object are used. (default: None)
 
             Returns
             -------
@@ -539,44 +497,17 @@ class VADER:
         '''
         if W_c is None:
             W_c = np.ones(X_c.shape, dtype=np.float32)
-        sess, saver, graph = self._restore_session()
-        rec_loss = graph.get_tensor_by_name("reconstruction_loss:0")
-        lat_loss = graph.get_tensor_by_name("latent_loss:0")
-        X = graph.get_tensor_by_name("X_input:0")
-        W = graph.get_tensor_by_name("W_input:0")
-        G = graph.get_tensor_by_name("G_input:0")
-        alpha_t = graph.get_tensor_by_name("alpha_input:0")
 
-        def my_get_variable(varname):
-            return [v for v in tf.compat.v1.global_variables() if v.name == varname][0]
-
-        mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
-        if mu_c is not None:
-            mu_c_new = mu_c
-            mu_c_old = mu_c_unscaled.eval()
-            sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(value=mu_c_new, dtype=tf.float32)))
-
-        sigma_c_unscaled = my_get_variable("sigma_c_unscaled:0")
-        if sigma_c is not None:
-            sigma_c_new = sigma_c
-            sigma_c_old = sigma_c_unscaled.eval()
-            sess.run(sigma_c_unscaled.assign(tf.contrib.distributions.softplus_inverse(tf.convert_to_tensor(value=sigma_c_new, dtype=tf.float32))))
-
-        phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
-        if phi_c is not None:
-            phi_c_new = phi_c
-            phi_c_old = phi_c_unscaled.eval()
-            sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(value=phi_c_new, dtype=tf.float32)))
+        x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde = self.model((X_c, W_c))
 
         G_c = 1 / np.bincount(self.groups)[self.groups]
         G_c = G_c / sum(G_c)
         G_c = np.broadcast_to(G_c, X_c.shape)
 
-        lat_loss = lat_loss.eval(feed_dict={X: X_c, W: W_c, G: G_c, alpha_t: self.alpha})
-        rec_loss = rec_loss.eval(feed_dict={X: X_c, W: W_c, G: G_c, alpha_t: self.alpha})
-
-        sess.close()
-        return {"reconstruction_loss": rec_loss, "latent_loss": lat_loss}
+        reconstruction_loss_val = self._reconstruction_loss(
+            X_c, x, x_raw, G_c * W_c, self.output_activation, self.D, self.I, self.eps).numpy
+        latent_loss_val = self._latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, self.K, self.eps).numpy
+        return {"reconstruction_loss": reconstruction_loss_val, "latent_loss": latent_loss_val}
 
     def get_imputation_matrix(self):
         '''
@@ -584,14 +515,9 @@ class VADER:
             -------
             The imputation matrix.
         '''
-        sess, saver, graph = self._restore_session()
-        def my_get_variable(varname):
-            return [v for v in tf.compat.v1.global_variables() if v.name == varname][0]
-        A = my_get_variable("A:0").eval()
-        sess.close()
-        return A
+        return self.model.imputation_layer.A
 
-    def cluster(self, X_c, W_c=None, mu_c=None, sigma_c=None, phi_c=None):
+    def cluster(self, X_c, W_c=None, mu_c=None, sigma2_c=None, phi_c=None):
         '''
             Cluster input data using this VADER object.
 
@@ -604,42 +530,18 @@ class VADER:
                 Missingness indicator. Numpy array with same dimensions as X_c. Entries in X_c for which the
                 corresponding entry in W_train equals 0 are treated as missing. More precisely, their specific numeric
                 value is completely ignored. If None, then no missingness is assumed. (default: None)
-            mu_c : float
-                The mixture component means, one for each self.K. Numpy array of dimensions [self.K, self.n_hidden[-1]].
-                If None, then the means of this VADER object are used. (default: None)
-            sigma_c : float
-                The mixture component variances, representing diagonal covariance matrices, one for each self.K. Numpy
-                array of dimensions [self.K, self.n_hidden[-1]]. If None, then the variances of this VADER object are
-                used. (default: None)
-            phi_c : float
-                The mixture component probabilities. List of length self.K. If None, then the component probabilities of
-                 this VADER object are used. (default: None)
 
             Returns
             -------
             Clusters encoded as integers.
         '''
-        sess, saver, graph = self._restore_session()
-        mu_tilde = graph.get_tensor_by_name("mu_tilde:0")
-        X = graph.get_tensor_by_name("X_input:0")
-        W = graph.get_tensor_by_name("W_input:0")
-        G = graph.get_tensor_by_name("G_input:0")
-        if mu_c is None:
-            mu_c = graph.get_tensor_by_name("mu_c:0").eval()
-        if sigma_c is None:
-            sigma_c = graph.get_tensor_by_name("sigma_c:0").eval()
-        if phi_c is None:
-            phi_c = graph.get_tensor_by_name("phi_c:0").eval()
-
         if W_c is None:
             W_c = np.ones(X_c.shape)
-        G_c = np.ones(X_c.shape)
+        x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde = self.model((X_c, W_c))
 
-        clusters = self._cluster(mu_tilde.eval(feed_dict={X: X_c, W: W_c, G: G_c}), mu_c, sigma_c, phi_c)
-        sess.close()
-        return clusters
+        return self._cluster(mu_tilde, mu_c, sigma2_c, phi_c)
 
-    def get_clusters(self):
+    def get_cluster_means(self):
         '''
             Get the cluster averages represented by this VADER object. Technically, this maps the latent Gaussian
             mixture means to output values using this VADER object.
@@ -651,39 +553,8 @@ class VADER:
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        sess, saver, graph = self._restore_session()
-        z = graph.get_tensor_by_name("z:0")
-        x = graph.get_tensor_by_name("x_output:0")
-        mu_c = graph.get_tensor_by_name("mu_c:0")
-
-        clusters = x.eval(feed_dict={z: mu_c.eval()})
-        sess.close()
-        return clusters
-
-    def get_latent_distribution(self):
-        '''
-            Get the parameters of the Gaussian mixture distribution of this VADER object.
-
-            Returns
-            -------
-            Dictionary with three components, "mu", "sigma_sq", "phi".
-        '''
-        if self.seed is not None:
-            np.random.seed(self.seed)
-
-        sess, saver, graph = self._restore_session()
-        sigma_c = graph.get_tensor_by_name("sigma_c:0")
-        mu_c = graph.get_tensor_by_name("mu_c:0")
-        phi_c = graph.get_tensor_by_name("phi_c:0")
-
-        res = {
-            "mu": mu_c.eval(),
-            "sigma_sq": sigma_c.eval(),
-            "phi": phi_c.eval()
-        }
-
-        sess.close()
-        return res
+        clusters = self.model.decode(self.gmm['mu_c'])
+        return clusters.numpy()
 
     def generate(self, n):
         '''
@@ -699,31 +570,21 @@ class VADER:
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        sess, saver, graph = self._restore_session()
-
-        z = graph.get_tensor_by_name("z:0")
-        x = graph.get_tensor_by_name("x_output:0")
-        sigma_c = graph.get_tensor_by_name("sigma_c:0")
-        mu_c = graph.get_tensor_by_name("mu_c:0")
-        phi_c = graph.get_tensor_by_name("phi_c:0")
-
         if self.recurrent:
             gen = np.zeros((n, self.D, self.I), dtype=np.float)
         else:
             gen = np.zeros((n, self.D), dtype=np.float)
-        c = np.random.choice(np.arange(self.K), size=n, p=phi_c.eval())
+        c = np.random.choice(np.arange(self.K), size=n, p=self.gmm['phi'])
         for k in np.arange(self.K):
             ii = np.flatnonzero(c == k)
             z_rnd = \
-                mu_c.eval()[None, k, :] + \
-                np.sqrt(sigma_c.eval())[None, k, :] * \
+                self.gmm['mu'][None, k, :] + \
+                np.sqrt(self.gmm['sigma2'])[None, k, :] * \
                 np.random.normal(size=[ii.shape[0], self.n_hidden[-1]])
-            # gen[ii,:] = x.eval(feed_dict={z: z_rnd})
             if self.recurrent:
-                gen[ii,:,:] = x.eval(feed_dict={z: z_rnd})
+                gen[ii,:,:] = self.model.decode(z_rnd)[0].numpy()
             else:
-                gen[ii,:] = x.eval(feed_dict={z: z_rnd})
-        sess.close()
+                gen[ii,:] = self.model.decode(z_rnd)[0].numpy()
         gen = {
             "clusters": c,
             "samples": gen
@@ -750,18 +611,8 @@ class VADER:
         if W_test is None:
             W_test = np.ones(X_test.shape)
 
-        G_test = np.ones(X_test.shape)
-
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        sess, saver, graph = self._restore_session()
+        return self.model((X_test, W_test))[0].numpy()
 
-        X = graph.get_tensor_by_name("X_input:0")
-        W = graph.get_tensor_by_name("W_input:0")
-        G = graph.get_tensor_by_name("G_input:0")
-        x_output = graph.get_tensor_by_name("x_output:0")
-
-        pred = x_output.eval(feed_dict={X: X_test, W: W_test, G: G_test})
-        sess.close()
-        return pred

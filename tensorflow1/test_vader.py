@@ -2,6 +2,7 @@ import numpy as np
 import os
 import sys
 sys.path.append(os.getcwd())
+sys.path.append('tensorflow1')
 from vader import VADER
 
 save_path = os.path.join('test_vader', 'vader.ckpt')
@@ -30,9 +31,13 @@ y_train = y_train * 2**0 + y_train[ii] * 2**1
 ii = np.random.permutation(ns * 2)
 X_train = X_train[ii,:]
 y_train = y_train[ii]
-# Randomly set values to missing (0: missing, 1: present)
+# Randomly set 50% of values to missing (0: missing, 1: present)
 # Note: All X_train[i,j] for which W_train[i,j] == 0 are treated as missing (i.e. their specific value is ignored)
 W_train = np.random.choice(2, X_train.shape)
+
+# normalize (better for fitting)
+for i in np.arange(X_train.shape[2]):
+    X_train[:,:,i] = (X_train[:,:,i] - np.mean(X_train[:,:,i])) / np.std(X_train[:,:,i])
 
 # Note: y_train is used purely for monitoring performance when a ground truth clustering is available.
 # It can be omitted if no ground truth is available.
@@ -62,6 +67,9 @@ y_train = np.repeat([0, 1], ns)
 ii = np.random.permutation(ns * 2)
 X_train = X_train[ii,:]
 y_train = y_train[ii]
+# normalize (better for fitting)
+X_train = (X_train - np.mean(X_train)) / np.std(X_train)
+
 vader = VADER(X_train=X_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=2,
               learning_rate=1e-3, output_activation=None, recurrent=False, batch_size=16)
 # pre-train without latent loss
