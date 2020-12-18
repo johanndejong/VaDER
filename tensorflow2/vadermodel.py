@@ -63,7 +63,7 @@ class VaderModel(tf.keras.Model):
                             W_A[i, j] = 1
             # if not available, then average across all variables
             A[W_A == 0] = np.mean(X[W == 1])
-            return A.astype(np.float32)
+            return A.astype(X.dtype)
 
         def sample(params):
             mu_tilde = params[0]
@@ -154,6 +154,6 @@ class VaderModel(tf.keras.Model):
         W = inputs[1]
         z, mu_tilde, log_sigma2_tilde = self.encode(X, W)
         x, x_raw = self.decode(z)
-        dummy_val = tf.constant(0.0, dtype=tf.float32)
+        dummy_val = tf.constant(0.0, dtype=x.dtype)
         mu_c, sigma2_c, phi_c = self.gmm_layer(dummy_val)
         return x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde
