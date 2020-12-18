@@ -7,7 +7,6 @@ class ImputationLayer(tf.keras.layers.Layer):
         self.A = self.add_weight(
             "A", shape=A_init.shape, initializer=tf.constant_initializer(A_init))
     def call(self, X, W):
-        W = tf.cast(W, X.dtype)
         return X * W + self.A * (1.0 - W)
 
 class RnnDecodeTransformLayer(tf.keras.layers.Layer):
@@ -130,7 +129,7 @@ class VaderModel(tf.keras.Model):
         z = self.z_layer((mu_tilde, log_sigma2_tilde))
         return z, mu_tilde, log_sigma2_tilde
 
-    @tf.function
+    @tf.function(experimental_relax_shapes=True)
     def decode(self, z):
         hidden = z
         if len(self.n_hidden) > 1:
@@ -138,7 +137,10 @@ class VaderModel(tf.keras.Model):
                 hidden = layer(hidden)
         if self.recurrent:
             inputs = tf.zeros((tf.shape(z)[0], self.D, self.I))
-            initial_state = (tf.zeros(tf.shape(input=hidden)), hidden)
+            if self.cell_type == "LSTM":
+                initial_state = (tf.zeros(tf.shape(input=hidden)), hidden)
+            else:
+                initial_state = hidden
             rnn_output = self.decoder_rnn(inputs=inputs, initial_state=initial_state)[0]
             x_raw = self.rnn_transform_layer(rnn_output, tf.shape(z)[0])
         else:
