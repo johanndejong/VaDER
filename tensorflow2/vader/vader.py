@@ -1,14 +1,11 @@
 import tensorflow as tf
-import time
-import tensorflow_probability as tfp
 from scipy.optimize import linear_sum_assignment as linear_assignment
 from sklearn import metrics
 from scipy.stats import multivariate_normal
-import sys
 import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-from vadermodel import VaderModel
+from .vadermodel import VaderRNN, VaderFFN
 
 class VADER:
     '''
@@ -54,7 +51,8 @@ class VADER:
                 Initial values for the mixture component probabilities. List of length k. If None, then initialization
                 is according to a uniform distribution. (default: None)
             cell_type : str
-                Cell type of the recurrent neural network. Currently only LSTM is supported. (default: "LSTM")
+                Cell type of the (recurrent) neural network in case len(self.X.shape) == 3. [LSTM, GRU]
+                (default: "LSTM")
             recurrent : bool
                 Train a recurrent autoencoder, or a non-recurrent autoencoder? (default: True)
             save_path : str
@@ -97,7 +95,7 @@ class VADER:
             alpha : float
                 Weight of the latent loss, relative to the reconstruction loss.
             cell_type : str
-                Cell type of the recurrent neural network. Currently only LSTM is supported.
+                Cell type of the recurrent neural network.
             recurrent : bool
                 Train a recurrent autoencoder, or a non-recurrent autoencoder?
             save_path : str
@@ -198,11 +196,14 @@ class VADER:
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, beta_1=0.9, beta_2=0.999, name="optimizer")
 
-        self.model = VaderModel(
-            self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
-            self.output_activation)
-
-
+        if not self.recurrent:
+            self.model = VaderFFN(
+                self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
+                self.output_activation)
+        else:
+            self.model = VaderRNN(
+                self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
+                self.output_activation)
 
         # the state of the untrained model
         self._update_state(self.model)
@@ -373,7 +374,7 @@ class VADER:
 
         # re-scale the loss to the original dims (making sure it balances correctly with the latent loss)
         num = tf.cast(tf.reduce_prod(input_tensor=tf.shape(input=W)), self.float_type)
-        den = tf.reduce_sum(input_tensor=W)
+        den = tf.cast(tf.reduce_sum(input_tensor=W), self.float_type)
         rec_loss = rec_loss * num / den
         rec_loss = rec_loss * self.D * self.I
 

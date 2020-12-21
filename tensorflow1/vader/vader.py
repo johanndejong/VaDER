@@ -1,4 +1,5 @@
 import tensorflow as tf
+import time
 from functools import partial
 from scipy.optimize import linear_sum_assignment as linear_assignment
 from scipy.stats import multivariate_normal
@@ -7,8 +8,8 @@ import os
 import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-import losses
-import layers
+from .losses import vader_reconstruction_loss, vader_latent_loss
+from .layers import encode, decode
 
 class VADER:
     '''
@@ -177,19 +178,19 @@ class VADER:
 
         # encoder function
         def g(X):
-            return layers.encode(X, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent)
+            return encode(X, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent)
 
         # decoder function
         def f(z):
-            return layers.decode(z, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent, self.output_activation)
+            return decode(z, self.D, self.I, self.cell_type, self.n_hidden, self.recurrent, self.output_activation)
 
         # reconstruction loss function
         def reconstruction_loss(X, x, x_raw, W):
-            return losses.reconstruction_loss(X, x, x_raw, W, self.output_activation, self.D, self.I, self.eps)
+            return vader_reconstruction_loss(X, x, x_raw, W, self.output_activation, self.D, self.I, self.eps)
 
         # latent loss function
         def latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde):
-            return losses.latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, self.K, self.eps)
+            return vader_latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, self.K, self.eps)
 
         tf.reset_default_graph()
         graph = tf.get_default_graph()
@@ -416,15 +417,14 @@ class VADER:
         for epoch in range(n_epoch): # NOTE: explicitly not self.epoch in case of repeated calls to fit!
             n_batches = self.X.shape[0] // self.batch_size
             for iteration in range(n_batches):
-                sys.stdout.flush()
                 X_batch, y_batch, W_batch, G_batch = self._get_batch(self.batch_size)
                 sess.run(training_op, feed_dict={X: X_batch, W: W_batch, G: G_batch, alpha_t: self.alpha})
             if verbose:
                 self._print_progress(epoch, sess, graph)
-        loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss], feed_dict={X: self.X, W: self.W, G: self.G, alpha_t: self.alpha})
-        self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
-        self.latent_loss = np.append(self.latent_loss, latent_loss_val)
-        self.loss = np.append(self.loss, loss_val)
+        # loss_val, reconstruction_loss_val, latent_loss_val = sess.run([loss, rec_loss, lat_loss], feed_dict={X: self.X, W: self.W, G: self.G, alpha_t: self.alpha})
+        # self.reconstruction_loss = np.append(self.reconstruction_loss, reconstruction_loss_val)
+        # self.latent_loss = np.append(self.latent_loss, latent_loss_val)
+        # self.loss = np.append(self.loss, loss_val)
         # if learning_rate is not None:
         #     self.learning_rate = self_learning_rate
         saver.save(sess, self.save_path)
@@ -432,7 +432,7 @@ class VADER:
         sess.close()
         return 0
 
-    def pre_fit(self, n_epoch=10, learning_rate=None, verbose=False):
+    def pre_fit(self, n_epoch=10, GMM_initialize=True, learning_rate=None, verbose=False):
         '''
             Pre-train a VADER object using only the latent loss, and initialize the Gaussian mixture parameters using
             the resulting latent representation.
@@ -441,6 +441,9 @@ class VADER:
             ----------
             n_epoch : int
                 Train n_epoch epochs. (default: 10)
+            GMM_initialize: bool
+                Should a GMM be fit on the pre-trained latent layer, in order to initialize the VaDER
+                mixture component parameters?
             learning_rate: float
                 Learning rate for this set of epochs(default: learning rate specified at object construction)
                 (NB: not currently used!)
@@ -459,33 +462,35 @@ class VADER:
         # pre-train
         ret = self.fit(n_epoch, learning_rate, verbose)
 
-        try:
-            # map to latent
-            z = self.map_to_latent(self.X, self.W, n_samp=10)
-            # fit GMM
-            gmm = GaussianMixture(n_components=self.K, covariance_type="diag", reg_covar=1e-04).fit(z)
-            # get GMM parameters
-            phi = np.log(gmm.weights_ + self.eps) # inverse softmax
-            mu = gmm.means_
-            sigma2 = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
+        if GMM_initialize:
+            try:
+                # map to latent
+                z = self.map_to_latent(self.X, self.W, n_samp=10)
+                # fit GMM
+                gmm = GaussianMixture(n_components=self.K, covariance_type="diag", reg_covar=1e-04).fit(z)
+                # get GMM parameters
+                phi = np.log(gmm.weights_ + self.eps) # inverse softmax
+                mu = gmm.means_
+                sigma2 = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
 
-            # initialize mixture components
-            sess, saver, graph = self._restore_session()
-            def my_get_variable(varname):
-                return [v for v in tf.global_variables() if v.name == varname][0]
-            mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
-            sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(mu, dtype=tf.float32)))
-            sigma2_c_unscaled = my_get_variable("sigma2_c_unscaled:0")
-            sess.run(sigma2_c_unscaled.assign(tf.convert_to_tensor(sigma2, dtype=tf.float32)))
-            phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
-            sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi, dtype=tf.float32)))
-            saver.save(sess, self.save_path)
-            sess.close()
-        except:
-            warnings.warn("Failed to initialize VaDER with Gaussian mixture")
-        finally:
-            # restore the alpha
-            self.alpha = alpha
+                # initialize mixture components
+                sess, saver, graph = self._restore_session()
+                def my_get_variable(varname):
+                    return [v for v in tf.global_variables() if v.name == varname][0]
+                mu_c_unscaled = my_get_variable("mu_c_unscaled:0")
+                sess.run(mu_c_unscaled.assign(tf.convert_to_tensor(mu, dtype=tf.float32)))
+                sigma2_c_unscaled = my_get_variable("sigma2_c_unscaled:0")
+                sess.run(sigma2_c_unscaled.assign(tf.convert_to_tensor(sigma2, dtype=tf.float32)))
+                phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
+                sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi, dtype=tf.float32)))
+                saver.save(sess, self.save_path)
+                sess.close()
+            except:
+                warnings.warn("Failed to initialize VaDER with Gaussian mixture")
+            finally:
+                pass
+        # restore the alpha
+        self.alpha = alpha
         return ret
 
     def map_to_latent(self, X_c, W_c=None, n_samp=1):

@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 
-def reconstruction_loss(X, x, x_raw, W, output_activation, D, I, eps=1e-10):
+def vader_reconstruction_loss(X, x, x_raw, W, output_activation, D, I, eps=1e-10):
     # reconstruction loss: E[log p(x|z)]
     # xentropy = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.clip_by_value(X, eps, 1-eps), logits=x_raw)
     # # summing across both dimensions: should I prove this?
@@ -22,20 +22,20 @@ def reconstruction_loss(X, x, x_raw, W, output_activation, D, I, eps=1e-10):
 
     return rec_loss
 
-def latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, K, eps=1e-10):
+def vader_latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, K, eps=1e-10):
     sigma2_tilde = tf.exp(log_sigma2_tilde)
-    log_sigma2_c = tf.math.log(eps + sigma2_c)
+    log_sigma2_c = tf.log(eps + sigma2_c)
     if K == 1:  # ordinary VAE
         latent_loss = tf.reduce_mean(input_tensor=0.5 * tf.reduce_sum(
             input_tensor=sigma2_tilde + tf.square(mu_tilde) - 1 - log_sigma2_tilde,
             axis=1
         ))
     else:
-        log_2pi = tf.math.log(2 * np.pi)
-        log_phi_c = tf.math.log(eps + phi_c)
+        log_2pi = tf.log(2 * np.pi)
+        log_phi_c = tf.log(eps + phi_c)
 
         # def f(i):
-        #     return - 0.5 * (log_sigma2_c[i] + log_2pi + tf.math.square(z - mu_c[i]) / sigma2_c[i])
+        #     return - 0.5 * (log_sigma2_c[i] + log_2pi + tf.square(z - mu_c[i]) / sigma2_c[i])
         # log_pdf_z = tf.transpose(a=tf.map_fn(f, np.arange(K), fn_output_signature=tf.float32), perm=[1, 0, 2])
 
         N = tf.shape(z)[0]
@@ -56,14 +56,14 @@ def latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, K, eps=1e-
         gamma_c = tf.exp(log_gamma_c)
 
         # # latent loss: E[log p(z|c) + log p(c) - log q(z|x) - log q(c|x)]
-        # term1 = tf.math.log(eps + sigma2_c)
+        # term1 = tf.log(eps + sigma2_c)
         # f2 = lambda i: sigma2_tilde / (eps + sigma2_c[i])
         # term2 = tf.transpose(a=tf.map_fn(f2, np.arange(K), tf.float32), perm=[1, 0, 2])
         # f3 = lambda i: tf.square(mu_tilde - mu_c[i]) / (eps + sigma2_c[i])
         # term3 = tf.transpose(a=tf.map_fn(f3, np.arange(K), tf.float32), perm=[1, 0, 2])
 
         # latent loss: E[log p(z|c) + log p(c) - log q(z|x) - log q(c|x)]
-        term1 = tf.math.log(eps + sigma2_c)
+        term1 = tf.log(eps + sigma2_c)
         N = tf.shape(sigma2_tilde)[0]
         ii, jj = tf.meshgrid(tf.range(K, dtype=tf.int32), tf.range(N, dtype=tf.int32))
         ii = tf.reshape(ii, [N * K])
@@ -73,7 +73,7 @@ def latent_loss(z, mu_c, sigma2_c, phi_c, mu_tilde, log_sigma2_tilde, K, eps=1e-
         term2 = tf.reshape(st_b / (eps + sc_b), [N, K, tf.shape(sigma2_tilde)[1]])
         mt_b = tf.gather(mu_tilde, jj, axis=0)
         mc_b = tf.gather(mu_c, ii, axis=0)
-        term3 = tf.reshape(tf.math.square(mt_b - mc_b) / (eps + sc_b), [N, K, tf.shape(sigma2_tilde)[1]])
+        term3 = tf.reshape(tf.square(mt_b - mc_b) / (eps + sc_b), [N, K, tf.shape(sigma2_tilde)[1]])
 
         latent_loss1 = 0.5 * tf.reduce_sum(
             input_tensor=gamma_c * tf.reduce_sum(input_tensor=term1 + term2 + term3, axis=2), axis=1)
