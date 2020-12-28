@@ -8,8 +8,8 @@ import os
 import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-from .losses import vader_reconstruction_loss, vader_latent_loss
-from .layers import encode, decode
+from losses import vader_reconstruction_loss, vader_latent_loss
+from layers import encode, decode
 
 class VADER:
     '''

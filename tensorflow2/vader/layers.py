@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from .utils import positional_encoding, scaled_dot_product_attention
+from utils import positional_encoding, scaled_dot_product_attention
 
 class ImputationLayer(tf.keras.layers.Layer):
     def __init__(self, A_init):

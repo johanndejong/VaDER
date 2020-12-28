@@ -5,7 +5,7 @@ from scipy.stats import multivariate_normal
 import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-from .vadermodel import VaderRNN, VaderFFN, VaderTransformer
+from vadermodel import VaderRNN, VaderFFN, VaderTransformer
 
 class VADER:
     '''

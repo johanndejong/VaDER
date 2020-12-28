@@ -2,8 +2,8 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import abc
 import numpy as np
-from .layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer, TransformerEncoder, TransformerDecoder
-from .utils import create_masks
+from layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer, TransformerEncoder, TransformerDecoder
+from utils import create_masks
 
 class VaderModel(tf.keras.Model):
     def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params=None):

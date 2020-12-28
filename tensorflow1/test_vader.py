@@ -42,12 +42,6 @@ W_train = np.random.choice(2, X_train.shape)
 for i in np.arange(X_train.shape[2]):
     X_train[:,:,i] = (X_train[:,:,i] - np.mean(X_train[:,:,i])) / np.std(X_train[:,:,i])
 
-import pickle
-X_train = pickle.load(open("../tensorflow2/X_train.pickle", "rb"))
-y_train = pickle.load(open("../tensorflow2/y_train.pickle", "rb"))
-W_train = pickle.load(open("../tensorflow2/W_train.pickle", "rb"))
-
-
 # Note: y_train is used purely for monitoring performance when a ground truth clustering is available.
 # It can be omitted if no ground truth is available.
 vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
@@ -55,17 +49,11 @@ vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_
 
 # pre-train without latent loss
 start = time.time()
-pr = cProfile.Profile()
-pr.enable()
 vader.pre_fit(n_epoch=50, verbose=True)
 # train with latent loss
 vader.fit(n_epoch=50, verbose=True)
-pr.disable()
-pr.dump_stats("test.prof")
 end = time.time()
 print("Elapsed: ", end - start)
-
-exit()
 
 # get the clusters
 c = vader.cluster(X_train)
