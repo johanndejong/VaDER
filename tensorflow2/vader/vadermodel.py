@@ -1,47 +1,12 @@
 import tensorflow as tf
+import tensorflow_addons as tfa
 import abc
 import numpy as np
-
-class ImputationLayer(tf.keras.layers.Layer):
-    def __init__(self, A_init):
-        super(ImputationLayer, self).__init__()
-        self.A = self.add_weight(
-            "A", shape=A_init.shape, initializer=tf.constant_initializer(A_init))
-    def call(self, X, W):
-        return X * W + self.A * (1.0 - W)
-
-class RnnDecodeTransformLayer(tf.keras.layers.Layer):
-    def __init__(self, n_hidden, I):
-        super(RnnDecodeTransformLayer, self).__init__()
-        weight_init = tf.constant_initializer(np.random.standard_normal([n_hidden, I]))
-        bias_init = tf.constant_initializer(np.zeros(I) + 0.1)
-        self.weight = self.add_weight(
-            "weight", shape=[n_hidden, I], initializer=tf.initializers.glorot_uniform())
-        self.bias = self.add_weight(
-            "bias", shape=[I], initializer=tf.initializers.glorot_uniform())
-    def call(self, rnn_output, batch_size):
-        # rnn_output = tf.transpose(rnn_output, perm=[1, 0, 2])
-        # rnn_output = tf.transpose(a=tf.stack(rnn_output), perm=[1, 0, 2])
-        weight = tf.tile(tf.expand_dims(self.weight, 0), [batch_size, 1, 1])
-        return tf.matmul(rnn_output, weight) + self.bias
-
-class GmmLayer(tf.keras.layers.Layer):
-    def __init__(self, n_hidden, K):
-        super(GmmLayer, self).__init__()
-        self.mu_c_unscaled = self.add_weight(
-            "mu_c_unscaled", shape=[K, n_hidden], initializer=tf.initializers.glorot_uniform())
-        self.sigma2_c_unscaled = self.add_weight(
-            "sigma2_c_unscaled", shape=[K, n_hidden], initializer=tf.initializers.glorot_uniform())
-        self.phi_c_unscaled = self.add_weight(
-            "phi_c_unscaled", shape=[K], initializer=tf.initializers.glorot_uniform())
-    def call(self, _):
-        mu_c = self.mu_c_unscaled
-        sigma2_c = tf.nn.softplus(self.sigma2_c_unscaled, name="sigma2_c")
-        phi_c = tf.nn.softmax(self.phi_c_unscaled, name="phi_c")
-        return mu_c, sigma2_c, phi_c
+from .layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer, TransformerEncoder, TransformerDecoder
+from .utils import create_masks
 
 class VaderModel(tf.keras.Model):
-    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation):
+    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params=None):
         super(VaderModel, self).__init__()
         self.D = D
         self.K = K
@@ -78,40 +43,38 @@ class VaderModel(tf.keras.Model):
 
     @tf.function
     @abc.abstractmethod
-    def encode(self, X, W):
+    def encode(self, X, W, training=False):
         pass
 
     @tf.function(experimental_relax_shapes=True)
     @abc.abstractmethod
-    def decode(self, z):
+    def decode(self, z, X=None, training=False):
         pass
 
     @tf.function
+    @abc.abstractmethod
     def call(self, inputs, training=False):
-        X = inputs[0]
-        W = inputs[1]
-        z, mu_tilde, log_sigma2_tilde = self.encode(X, W)
-        x, x_raw = self.decode(z)
-        dummy_val = tf.constant(0.0, dtype=x.dtype)
-        mu_c, sigma2_c, phi_c = self.gmm_layer(dummy_val)
-        return x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde
+        pass
 
 class VaderRNN(VaderModel):
-    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation):
+    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params=None):
         super(VaderRNN, self).__init__(X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation)
         if len(n_hidden) > 1:
             if cell_type == "LSTM":
-                encoder = tf.keras.experimental.PeepholeLSTMCell(n_hidden[0], activation=tf.nn.tanh, name="encoder")
-                decoder = tf.keras.experimental.PeepholeLSTMCell(n_hidden[0], activation=tf.nn.tanh, name="decoder")
-            else:
+                encoder = tfa.rnn.PeepholeLSTMCell(n_hidden[0], activation=tf.nn.tanh, name="encoder")
+                decoder = tfa.rnn.PeepholeLSTMCell(n_hidden[0], activation=tf.nn.tanh, name="decoder")
+            elif cell_type == "GRU":
                 encoder = tf.keras.layers.GRUCell(n_hidden[0], activation=tf.nn.tanh, name="encoder")
                 decoder = tf.keras.layers.GRUCell(n_hidden[0], activation=tf.nn.tanh, name="decoder")
+            else:
+                encoder = tf.keras.layers.SimpleRNNCell(n_hidden[0], activation=tf.nn.tanh, name="encoder")
+                decoder = tf.keras.layers.SimpleRNNCell(n_hidden[0], activation=tf.nn.tanh, name="decoder")
             self.ae_encode_layers = [tf.keras.layers.Dense(n, activation=tf.nn.softplus) for n in n_hidden[1:-1]]
             self.mu_layer = tf.keras.layers.Dense(n_hidden[-1], activation=None, name="mu_tilde")
             self.log_sigma2_layer = tf.keras.layers.Dense(n_hidden[-1], activation=None, name="log_sigma2_tilde")
             self.rnn_transform_layer = RnnDecodeTransformLayer(n_hidden[0], I)
-            self.ae_decode_layers = [tf.keras.layers.Dense(n, activation=tf.nn.softplus) for n in
-                                     (n_hidden[:-1])[::-1]]
+            self.ae_decode_layers = [
+                tf.keras.layers.Dense(n, activation=tf.nn.softplus) for n in (n_hidden[:-1])[::-1]]
         else:
             n_hidden = n_hidden[0]
             if cell_type == "LSTM":
@@ -119,10 +82,13 @@ class VaderRNN(VaderModel):
                 encoder = tf.keras.experimental.PeepholeLSTMCell(
                     n_hidden + n_hidden, activation=tf.nn.tanh, name="encoder")
                 decoder = tf.keras.experimental.PeepholeLSTMCell(n_hidden, activation=tf.nn.tanh, name="decoder")
-            else:
+            elif cell_type == "GRU":
                 # one n_hidden for mu, one for sigma2
                 encoder = tf.keras.layers.GRUCell(n_hidden + n_hidden, activation=tf.nn.tanh, name="encoder")
                 decoder = tf.keras.layers.GRUCell(n_hidden, activation=tf.nn.tanh, name="decoder")
+            else:
+                encoder = tf.keras.layers.SimpleRNNCell(n_hidden + n_hidden, activation=tf.nn.tanh, name="encoder")
+                decoder = tf.keras.layers.SimpleRNNCell(n_hidden, activation=tf.nn.tanh, name="decoder")
             self.mu_layer = tf.keras.layers.Lambda(lambda hidden: hidden[:, :n_hidden], name="mu_tilde")
             self.log_sigma2_layer = tf.keras.layers.Lambda(
                 lambda hidden: hidden[:, n_hidden:], name="log_sigma2_tilde")
@@ -134,7 +100,7 @@ class VaderRNN(VaderModel):
         self.decoder_rnn = tf.keras.layers.RNN(decoder, unroll=False, return_state=True, return_sequences=True)
 
     @tf.function
-    def encode(self, X, W):
+    def encode(self, X, W, training=False):
         X_imputed = self.imputation_layer(X, W)
         # X_imputed = [tf.squeeze(t, [1]) for t in tf.split(X_imputed, self.D, 1)]
         hidden = self.encoder_rnn(X_imputed)[-1]  # [1] ???
@@ -147,7 +113,7 @@ class VaderRNN(VaderModel):
         return z, mu_tilde, log_sigma2_tilde
 
     @tf.function(experimental_relax_shapes=True)
-    def decode(self, z):
+    def decode(self, z, X=None, training=False):
         hidden = z
         if len(self.n_hidden) > 1:
             for layer in self.ae_decode_layers:
@@ -162,8 +128,18 @@ class VaderRNN(VaderModel):
         x = self.output_activation(x_raw, name="x_output")
         return x, x_raw
 
+    @tf.function
+    def call(self, inputs, training=False):
+        X = inputs[0]
+        W = inputs[1]
+        z, mu_tilde, log_sigma2_tilde = self.encode(X, W)
+        x, x_raw = self.decode(z)
+        dummy_val = tf.constant(0.0, dtype=x.dtype)
+        mu_c, sigma2_c, phi_c = self.gmm_layer(dummy_val)
+        return x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde
+
 class VaderFFN(VaderModel):
-    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation):
+    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params=None):
         super(VaderFFN, self).__init__(X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation)
         self.ae_encode_layers = [tf.keras.layers.Dense(n, activation=tf.nn.softplus) for n in n_hidden[:-1]]
         self.mu_layer = tf.keras.layers.Dense(n_hidden[-1], activation=None, name="mu_tilde")
@@ -172,7 +148,7 @@ class VaderFFN(VaderModel):
         self.x_raw_layer = tf.keras.layers.Dense(D, activation=None, name="x_raw")
 
     @tf.function
-    def encode(self, X, W):
+    def encode(self, X, W, training=False):
         X_imputed = self.imputation_layer(X, W)
         hidden = X_imputed
         if len(self.n_hidden) > 1:
@@ -184,7 +160,7 @@ class VaderFFN(VaderModel):
         return z, mu_tilde, log_sigma2_tilde
 
     @tf.function(experimental_relax_shapes=True)
-    def decode(self, z):
+    def decode(self, z, X=None, training=False):
         hidden = z
         if len(self.n_hidden) > 1:
             for layer in self.ae_decode_layers:
@@ -193,3 +169,87 @@ class VaderFFN(VaderModel):
         x = self.output_activation(x_raw, name="x_output")
         return x, x_raw
 
+    @tf.function
+    def call(self, inputs, training=False):
+        X = inputs[0]
+        W = inputs[1]
+        z, mu_tilde, log_sigma2_tilde = self.encode(X, W)
+        x, x_raw = self.decode(z)
+        dummy_val = tf.constant(0.0, dtype=x.dtype)
+        mu_c, sigma2_c, phi_c = self.gmm_layer(dummy_val)
+        return x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde
+
+class VaderTransformer(VaderModel):
+    def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params = None):
+        # add SOS, as in text data, in order to make sure that the imputation layer gets correctly initialized
+        sos = np.zeros([X.shape[0], 1, X.shape[2]], "float32")
+        X = np.append(sos, X, axis=1)
+        W = np.append(sos, W, axis=1)
+        # sos = tf.zeros([tf.shape(X)[0], 1, tf.shape(X)[2]], "float32")
+        # X = tf.concat([sos, X], axis=1)
+        # W = tf.concat([sos, W], axis=1)
+        super(VaderTransformer, self).__init__(
+            X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params)
+        self.d_model = cell_params['d_model']
+        self.num_layers = cell_params['num_layers']
+        self.num_heads = cell_params['num_heads']
+        self.dff = cell_params['dff']
+        self.rate = cell_params['rate']
+        self.max_pe = self.D + 1 # maximum positional encoding
+        self.encoder = TransformerEncoder(self.num_layers, self.D, self.d_model, self.num_heads, self.dff, self.max_pe, self.rate)
+        self.decoder = TransformerDecoder(self.num_layers, self.D, self.d_model, self.num_heads, self.dff, self.max_pe, self.rate)
+        self.connect_layer = tf.keras.layers.Dense((self.D + 1) * self.d_model, activation="relu")
+        self.final_layer = tf.keras.layers.Dense(self.I)  # tf.keras.layers.Conv1DTranspose?
+
+        self.ae_encode_layers = [tf.keras.layers.Dense(n, activation=tf.nn.softplus) for n in n_hidden[:-1]]
+        self.mu_layer = tf.keras.layers.Dense(n_hidden[-1], activation=None, name="mu_tilde")
+        self.log_sigma2_layer = tf.keras.layers.Dense(n_hidden[-1], activation=None, name="log_sigma2_tilde")
+        self.ae_decode_layers = [
+            tf.keras.layers.Dense(n, activation=tf.nn.softplus) for n in (n_hidden[:-1])[::-1]]
+
+    @tf.function
+    def encode(self, X, W, training=False):
+        X_imputed = self.imputation_layer(X, W)
+        enc_padding_mask, look_ahead_mask, dec_padding_mask = create_masks(X_imputed)
+        enc_output = self.encoder(X_imputed, training=training, mask=enc_padding_mask)
+        # use (self.D + 1) because of the SOS added at the beginning
+        hidden = tf.reshape(enc_output, [-1, (self.D + 1) * self.d_model])
+        if len(self.n_hidden) > 1:
+            for layer in self.ae_encode_layers:
+                hidden = layer(hidden)
+        mu_tilde = self.mu_layer(hidden)
+        log_sigma2_tilde = self.log_sigma2_layer(hidden)
+        z = self.z_layer((mu_tilde, log_sigma2_tilde))
+        return z, mu_tilde, log_sigma2_tilde
+
+    @tf.function(experimental_relax_shapes=True)
+    def decode(self, z, X, training=False):
+        hidden = z
+        for layer in self.ae_decode_layers:
+            hidden = layer(hidden)
+        hidden = self.connect_layer(hidden)
+        # use (self.D + 1) because of the SOS added at the beginning
+        hidden = tf.reshape(hidden, [-1, (self.D + 1), self.d_model])
+        enc_padding_mask, look_ahead_mask, dec_padding_mask = create_masks(hidden)
+        dec_output, attention_weights = self.decoder(
+            X[:, :-1, :], hidden, training=training, look_ahead_mask=look_ahead_mask, padding_mask=dec_padding_mask)
+        x_raw = self.final_layer(dec_output)
+        x = self.output_activation(x_raw, name="x_output")
+        return x, x_raw, attention_weights
+
+    @tf.function
+    def call(self, inputs, training=False):
+        X = inputs[0]
+        W = inputs[1]
+        # add 'SOS' as in text data
+        # sos = np.zeros([X.shape[0], 1, X.shape[2]], "float32")
+        # X = np.append(sos, X, axis=1)
+        # W = np.append(sos, W, axis=1)
+        sos = tf.zeros([tf.shape(X)[0], 1, tf.shape(X)[2]], "float32")
+        X = tf.concat([sos, X], axis=1)
+        W = tf.concat([sos, W], axis=1)
+        z, mu_tilde, log_sigma2_tilde = self.encode(X, W, training=training)
+        x, x_raw, attention_weights = self.decode(z, X, training=training)
+        dummy_val = tf.constant(0.0, dtype=x.dtype)
+        mu_c, sigma2_c, phi_c = self.gmm_layer(dummy_val)
+        return x, x_raw, mu_c, sigma2_c, phi_c, z, mu_tilde, log_sigma2_tilde

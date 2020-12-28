@@ -5,14 +5,14 @@ from scipy.stats import multivariate_normal
 import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-from .vadermodel import VaderRNN, VaderFFN
+from .vadermodel import VaderRNN, VaderFFN, VaderTransformer
 
 class VADER:
     '''
         A VADER object represents a (recurrent) (variational) (Gaussian mixture) autoencoder
     '''
     def __init__(self, X_train, W_train=None, y_train=None, n_hidden=[12, 2], k=3, groups=None, output_activation=None,
-        batch_size = 32, learning_rate=1e-3, alpha=1.0, phi=None, cell_type="LSTM", recurrent=True,
+        batch_size = 32, learning_rate=1e-3, alpha=1.0, phi=None, cell_type="LSTM", cell_params=None, recurrent=True,
         save_path=None, eps=1e-10, seed=None, n_thread=0):
         '''
             Constructor for class VADER
@@ -51,8 +51,15 @@ class VADER:
                 Initial values for the mixture component probabilities. List of length k. If None, then initialization
                 is according to a uniform distribution. (default: None)
             cell_type : str
-                Cell type of the (recurrent) neural network in case len(self.X.shape) == 3. [LSTM, GRU]
+                Cell type of the (recurrent) neural network in case len(self.X.shape) == 3. [LSTM, GRU, SimpleRNN]
                 (default: "LSTM")
+            cell_params : dict
+                Dictionary with (key, value) pairs for cell_type-specific hyperparameters. Only used for
+                cell_type == "Transformer".
+                (defaults to: {'d_model': 8, 'num_layers': 2, 'num_heads': 2, 'dff': 32, 'max_pe': 1e2, 'rate': 0.0},
+                interpreted as in https://www.tensorflow.org/tutorials/text/transformer#scaled_dot_product_attention.
+                Note that the use of dropout can be debated, due to the regularizing properties of the variational
+                layer.)
             recurrent : bool
                 Train a recurrent autoencoder, or a non-recurrent autoencoder? (default: True)
             save_path : str
@@ -96,6 +103,8 @@ class VADER:
                 Weight of the latent loss, relative to the reconstruction loss.
             cell_type : str
                 Cell type of the recurrent neural network.
+            cell_params : dict
+                Dictionary with (key, value) pairs for cell_type-specific hyperparameters.
             recurrent : bool
                 Train a recurrent autoencoder, or a non-recurrent autoencoder?
             save_path : str
@@ -184,6 +193,9 @@ class VADER:
         self.gmm = {'mu': None, 'sigma2': None, 'phi': None}
         self.n_param = None
         self.cell_type = cell_type
+        self.cell_params = cell_params
+        if cell_type == "Transformer" and cell_params is None:
+            self.cell_params = {'d_model': 8, 'num_layers': 2, 'num_heads': 2, 'dff': 32, 'rate': 0.1}
         self.recurrent = recurrent
         # experiment: encode as np.array
         if self.recurrent:
@@ -199,11 +211,15 @@ class VADER:
         if not self.recurrent:
             self.model = VaderFFN(
                 self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
-                self.output_activation)
+                self.output_activation, self.cell_params)
+        elif self.cell_type == "Transformer":
+            self.model = VaderTransformer(
+                self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
+                self.output_activation, self.cell_params)
         else:
             self.model = VaderRNN(
                 self.X, self.W, self.D, self.K, self.I, self.cell_type, self.n_hidden, self.recurrent,
-                self.output_activation)
+                self.output_activation, self.cell_params)
 
         # the state of the untrained model
         self._update_state(self.model)

@@ -6,6 +6,7 @@ import cProfile
 import tensorflow as tf
 tf.config.run_functions_eagerly(False)
 from tensorflow2.vader.vader import VADER
+# from tensorflow2.prog import Transformer
 
 save_path = os.path.join('test_vader', 'vader.ckpt')
 
@@ -13,7 +14,7 @@ np.random.seed(123)
 
 # generating some simple random data [ns * 2 samples, nt - 1 time points, 2 variables]
 nt = int(8)
-ns = int(5e2)
+ns = int(5e2    )
 sigma = 0.5
 mu1 = -2
 mu2 = 2
@@ -35,9 +36,9 @@ y_train = y_train * 2**0 + y_train[ii] * 2**1
 ii = np.random.permutation(ns * 2)
 X_train = X_train[ii,:]
 y_train = y_train[ii]
-# Randomly set 50% of values to missing (0: missing, 1: present)
+# Randomly set 20% of values to missing (0: missing, 1: present)
 # Note: All X_train[i,j] for which W_train[i,j] == 0 are treated as missing (i.e. their specific value is ignored)
-W_train = np.random.choice(2, X_train.shape)
+W_train = np.random.choice(2, X_train.shape, p=[0.2, 0.8])
 
 # normalize (better for fitting)
 for i in np.arange(X_train.shape[2]):
@@ -46,17 +47,27 @@ for i in np.arange(X_train.shape[2]):
 # Note: y_train is used purely for monitoring performance when a ground truth clustering is available.
 # It can be omitted if no ground truth is available.
 vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
-              learning_rate=1e-3, output_activation=None, recurrent=True, batch_size=16)
-
+              learning_rate=1e-3, output_activation=None, recurrent=True, cell_type="LSTM", batch_size=64)
 # pre-train without latent loss
 start = time.time()
-pr = cProfile.Profile()
-pr.enable()
 vader.pre_fit(n_epoch=50, verbose=True)
 # train with latent loss
 vader.fit(n_epoch=50, verbose=True)
-pr.disable()
-pr.dump_stats("test.prof")
+end = time.time()
+print("Elapsed: ", end - start)
+
+# We can also train a Transformer-based Gaussian mixture variational autoencoder. Note the use of the parameter
+# "cell_params". These are hyperparameters to the transformer architecture, and are interpreted as in
+# https://www.tensorflow.org/tutorials/text/transformer
+# The use of dropout can be debated, due to the regularizing properties of the variational layer
+vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
+              learning_rate=1e-3, output_activation=None, recurrent=True, cell_type="Transformer", batch_size=64,
+              cell_params={'d_model': 4, 'num_layers': 1, 'num_heads': 1, 'dff': 16, 'rate': 0.0})
+# pre-train without latent loss
+start = time.time()
+vader.pre_fit(n_epoch=50, verbose=True)
+# train with latent loss
+vader.fit(n_epoch=50, verbose=True)
 end = time.time()
 print("Elapsed: ", end - start)
 
