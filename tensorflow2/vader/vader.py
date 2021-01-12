@@ -321,7 +321,11 @@ class VADER:
                 # get GMM parameters
                 phi = np.log(gmm.weights_ + self.eps) # inverse softmax
                 mu = gmm.means_
-                sigma2 = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
+                def inverse_softplus(x):
+                    b = x < 1e2
+                    x[b] = np.log(np.exp(x[b]) - 1.0 + self.eps)
+                    return x
+                sigma2 = inverse_softplus(gmm.covariances_)
 
                 # initialize mixture components
                 def my_get_variable(varname):
@@ -332,6 +336,7 @@ class VADER:
                 sigma2_c_unscaled.assign(tf.convert_to_tensor(value=sigma2, dtype=self.float_type))
                 phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
                 phi_c_unscaled.assign(tf.convert_to_tensor(value=phi, dtype=self.float_type))
+                self.gmm = {'mu': mu, 'sigma2': sigma2, 'phi': phi}
             except:
                 warnings.warn("Failed to initialize VaDER with Gaussian mixture")
             finally:
@@ -540,6 +545,8 @@ class VADER:
         '''
         if W_c is None:
             W_c = np.ones(X_c.shape, dtype=self.float_type)
+        else:
+            W_c = W_c.astype(X_c.dtype)
         return np.concatenate([self.model((X_c, W_c))[5] for i in np.arange(n_samp)], axis=0)
 
     def get_loss(self, X_c, W_c=None, mu_c=None, sigma2_c=None, phi_c=None):

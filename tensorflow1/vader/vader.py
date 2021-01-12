@@ -471,7 +471,11 @@ class VADER:
                 # get GMM parameters
                 phi = np.log(gmm.weights_ + self.eps) # inverse softmax
                 mu = gmm.means_
-                sigma2 = np.log(np.exp(gmm.covariances_) - 1.0 + self.eps) # inverse softplus
+                def inverse_softplus(x):
+                    b = x < 1e2
+                    x[b] = np.log(np.exp(x[b]) - 1.0 + self.eps)
+                    return x
+                sigma2 = inverse_softplus(gmm.covariances_)
 
                 # initialize mixture components
                 sess, saver, graph = self._restore_session()
