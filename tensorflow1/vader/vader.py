@@ -1,9 +1,6 @@
 import tensorflow as tf
-import time
-from functools import partial
 from scipy.optimize import linear_sum_assignment as linear_assignment
 from scipy.stats import multivariate_normal
-import sys
 import os
 import numpy as np
 import warnings
@@ -250,6 +247,7 @@ class VADER:
 
             optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate, beta1=0.9, beta2=0.999, name="optimizer")
             gradients, variables = zip(*optimizer.compute_gradients(loss))
+            gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
             training_op = optimizer.apply_gradients(zip(gradients, variables), name="training_op")
 
             init = tf.global_variables_initializer()
@@ -487,6 +485,7 @@ class VADER:
                 sess.run(sigma2_c_unscaled.assign(tf.convert_to_tensor(sigma2, dtype=tf.float32)))
                 phi_c_unscaled = my_get_variable("phi_c_unscaled:0")
                 sess.run(phi_c_unscaled.assign(tf.convert_to_tensor(phi, dtype=tf.float32)))
+                self.gmm = {'mu': mu, 'sigma2': sigma2, 'phi': phi}
                 saver.save(sess, self.save_path)
                 sess.close()
             except:

@@ -206,7 +206,8 @@ class VADER:
         if self.seed is not None:
             tf.random.set_seed(self.seed)
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, beta_1=0.9, beta_2=0.999, name="optimizer")
+        self.optimizer = tf.keras.optimizers.Adam(
+            learning_rate=self.learning_rate, beta_1=0.9, beta_2=0.999, name="optimizer", clipnorm=5.0)
 
         if not self.recurrent:
             self.model = VaderFFN(
