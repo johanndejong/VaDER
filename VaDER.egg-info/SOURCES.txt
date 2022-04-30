@@ -1,0 +1,13 @@
+LICENSE
+README.md
+setup.py
+VaDER/__init__.py
+VaDER/layers.py
+VaDER/utils.py
+VaDER/vader.py
+VaDER/vadermodel.py
+VaDER.egg-info/PKG-INFO
+VaDER.egg-info/SOURCES.txt
+VaDER.egg-info/dependency_links.txt
+VaDER.egg-info/requires.txt
+VaDER.egg-info/top_level.txt
