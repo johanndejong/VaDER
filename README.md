@@ -3,11 +3,3 @@ This repository contains code for a method for clustering multivariate time seri
 The use of the method is not restricted to clinical data. It can generally be used for multivariate time series data. 
 
 In addition to variational autoencoders with gaussian mixture priors, the code allows to train ordinary variational autoencoders (multivariate gaussian prior) and ordinary autoencoders (without prior), for all available time series models (LSTM, GRUs and Transformers).
-
-The code was written using
-
-(1) Python 3.6 and Tensorflow 1.10.1 (directory tensorflow1), and
-
-(2) Python 3.8 and Tensorflow 2.4.0 (directory tensorflow2).
-
-Note that only the Tensorflow 2.4.0 version gives the option for training transformer networks in addition to LSTMs/GRUs.

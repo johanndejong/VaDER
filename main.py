@@ -1,10 +1,9 @@
 import numpy as np
 import time
 import os
-import sys
-import cProfile
 import tensorflow as tf
-from tensorflow1.vader.vader import VADER
+tf.config.run_functions_eagerly(False)
+from VaDER.vader import VADER
 
 save_path = os.path.join('test_vader', 'vader.ckpt')
 
@@ -34,9 +33,9 @@ y_train = y_train * 2**0 + y_train[ii] * 2**1
 ii = np.random.permutation(ns * 2)
 X_train = X_train[ii,:]
 y_train = y_train[ii]
-# Randomly set 50% of values to missing (0: missing, 1: present)
+# Randomly set 20% of values to missing (0: missing, 1: present)
 # Note: All X_train[i,j] for which W_train[i,j] == 0 are treated as missing (i.e. their specific value is ignored)
-W_train = np.random.choice(2, X_train.shape)
+W_train = np.random.choice(2, X_train.shape, p=[0.2, 0.8])
 
 # normalize (better for fitting)
 for i in np.arange(X_train.shape[2]):
@@ -45,8 +44,7 @@ for i in np.arange(X_train.shape[2]):
 # Note: y_train is used purely for monitoring performance when a ground truth clustering is available.
 # It can be omitted if no ground truth is available.
 vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
-              learning_rate=1e-3, output_activation=None, recurrent=True, batch_size=16)
-
+              learning_rate=1e-3, output_activation=None, recurrent=True, cell_type="LSTM", batch_size=64)
 # pre-train without latent loss
 start = time.time()
 vader.pre_fit(n_epoch=50, verbose=True)
@@ -54,6 +52,24 @@ vader.pre_fit(n_epoch=50, verbose=True)
 vader.fit(n_epoch=50, verbose=True)
 end = time.time()
 print("Elapsed: ", end - start)
+
+# We can also train a Transformer-based Gaussian mixture variational autoencoder. Note the use of the parameter
+# "cell_params". These are hyperparameters to the transformer architecture, and are interpreted as in
+# https://www.tensorflow.org/tutorials/text/transformer
+# The use of dropout can be debated, due to the regularizing properties of the variational layer
+# Also note that a Transformer is not a great model choice for this data...
+vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
+              learning_rate=1e-3, output_activation=None, recurrent=True, cell_type="Transformer", batch_size=64,
+              cell_params={'d_model': 4, 'num_layers': 1, 'num_heads': 1, 'dff': 16, 'rate': 0.0})
+# pre-train without latent loss
+start = time.time()
+vader.pre_fit(n_epoch=50, verbose=True)
+# train with latent loss
+vader.fit(n_epoch=50, verbose=True)
+end = time.time()
+print("Elapsed: ", end - start)
+
+exit()
 
 # get the clusters
 c = vader.cluster(X_train)
