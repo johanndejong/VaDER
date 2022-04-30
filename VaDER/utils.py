@@ -1,5 +1,12 @@
 import tensorflow as tf
 import numpy as np
+from scipy.optimize import linear_sum_assignment as linear_assignment
+from sklearn import metrics
+from scipy.stats import multivariate_normal
+import warnings
+from sklearn.mixture import GaussianMixture
+import tensorflow_addons as tfa
+import abc
 
 def get_angles(pos, i, d_model):
     angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
@@ -63,7 +70,6 @@ def scaled_dot_product_attention(q, k, v, mask):
     output = tf.matmul(attention_weights, v)  # (..., seq_len_q, depth_v)
 
     return output, attention_weights
-
 
 def create_masks(inp):
     # does not matter which i we take for inp[:,:,i], so just take i=0

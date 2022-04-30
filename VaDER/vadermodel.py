@@ -1,9 +1,19 @@
 import tensorflow as tf
+import numpy as np
+from scipy.optimize import linear_sum_assignment as linear_assignment
+from sklearn import metrics
+from scipy.stats import multivariate_normal
+import warnings
+from sklearn.mixture import GaussianMixture
 import tensorflow_addons as tfa
 import abc
-import numpy as np
-from layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer, TransformerEncoder, TransformerDecoder
-from utils import create_masks
+
+from VaDER.layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer, MultiHeadAttention, \
+    point_wise_feed_forward_network, TransformerEncoderLayer, TransformerDecoderLayer, \
+    TransformerEncoder, TransformerDecoder
+from VaDER.utils import get_angles, positional_encoding, create_padding_mask, create_look_ahead_mask, \
+    scaled_dot_product_attention, create_masks
+
 
 class VaderModel(tf.keras.Model):
     def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params=None):

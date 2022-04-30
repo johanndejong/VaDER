@@ -1,11 +1,14 @@
 import tensorflow as tf
+import numpy as np
 from scipy.optimize import linear_sum_assignment as linear_assignment
 from sklearn import metrics
 from scipy.stats import multivariate_normal
-import numpy as np
 import warnings
 from sklearn.mixture import GaussianMixture
-from vadermodel import VaderRNN, VaderFFN, VaderTransformer
+import tensorflow_addons as tfa
+import abc
+
+from VaDER.vadermodel import VaderModel, VaderRNN, VaderFFN, VaderTransformer
 
 class VADER:
     '''
