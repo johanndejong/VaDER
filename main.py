@@ -53,24 +53,6 @@ vader.fit(n_epoch=50, verbose=True)
 end = time.time()
 print("Elapsed: ", end - start)
 
-# We can also train a Transformer-based Gaussian mixture variational autoencoder. Note the use of the parameter
-# "cell_params". These are hyperparameters to the transformer architecture, and are interpreted as in
-# https://www.tensorflow.org/tutorials/text/transformer
-# The use of dropout can be debated, due to the regularizing properties of the variational layer
-# Also note that a Transformer is not a great model choice for this data...
-vader = VADER(X_train=X_train, W_train=W_train, y_train=y_train, save_path=save_path, n_hidden=[12, 2], k=4,
-              learning_rate=1e-3, output_activation=None, recurrent=True, cell_type="Transformer", batch_size=64,
-              cell_params={'d_model': 4, 'num_layers': 1, 'num_heads': 1, 'dff': 16, 'rate': 0.0})
-# pre-train without latent loss
-start = time.time()
-vader.pre_fit(n_epoch=50, verbose=True)
-# train with latent loss
-vader.fit(n_epoch=50, verbose=True)
-end = time.time()
-print("Elapsed: ", end - start)
-
-exit()
-
 # get the clusters
 c = vader.cluster(X_train)
 # get the re-constructions
