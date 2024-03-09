@@ -4,3 +4,4 @@ scipy==1.7.3
 setuptools==57.0.0
 tensorflow==2.7.1
 tensorflow_addons==0.16.1
+protobuf==3.20.*

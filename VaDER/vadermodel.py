@@ -8,12 +8,7 @@ from sklearn.mixture import GaussianMixture
 import tensorflow_addons as tfa
 import abc
 
-from VaDER.layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer, MultiHeadAttention, \
-    point_wise_feed_forward_network, TransformerEncoderLayer, TransformerDecoderLayer, \
-    TransformerEncoder, TransformerDecoder
-from VaDER.utils import get_angles, positional_encoding, create_padding_mask, create_look_ahead_mask, \
-    scaled_dot_product_attention, create_masks
-
+from VaDER.layers import ImputationLayer, RnnDecodeTransformLayer, GmmLayer
 
 class VaderModel(tf.keras.Model):
     def __init__(self, X, W, D, K, I, cell_type, n_hidden, recurrent, output_activation, cell_params=None):

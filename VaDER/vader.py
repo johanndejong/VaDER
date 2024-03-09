@@ -8,7 +8,7 @@ from sklearn.mixture import GaussianMixture
 import tensorflow_addons as tfa
 import abc
 
-from VaDER.vadermodel import VaderModel, VaderRNN, VaderFFN, VaderTransformer
+from VaDER.vadermodel import VaderModel, VaderRNN, VaderFFN
 
 class VADER:
     '''
